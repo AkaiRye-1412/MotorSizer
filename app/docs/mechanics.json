@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "values": [
+    {"name": "gravity", "group": "physics", "value": 9.81, "unit": "m/s²", "source": "MotorSizer_Dialog.cs line 25835"},
+    {"name": "consistency tolerance", "group": "motion", "value": 0.00005, "unit": "absolute", "source": "calcParameters() line 23457"},
+    {"name": "max acceleration", "group": "motion", "value": 100000, "unit": "m/s²", "source": "calcParameters() line 23739"},
+    {"name": "trapezoid default segment split", "group": "motion", "value": 0.333333, "unit": "fraction", "source": "calcParameters() ta=TravelTime/3 line 23419"},
+    {"name": "default safety factor", "group": "selection", "value": 1.5, "unit": "multiplier", "source": "calcSingle() line 25831"},
+    {"name": "jerk param", "group": "scurve", "value": "4V/ta^2", "unit": "m/s³", "source": "calcSingle_S_Curve() line 26599"},
+    {"name": "scurve accel time", "group": "scurve", "value": "V/A + A/jerk", "unit": "s", "source": "calcSingle_S_Curve() line 26614"},
+    {"name": "DDR back EMF conversion", "group": "rotary", "value": 9.5493, "unit": "factor 30/pi", "source": "ShowSelectedMotorAll() line 35288"},
+    {"name": "voice coil stroke conversion", "group": "selection", "value": 0.001, "unit": "mm to m", "source": "Recommend_Motor_L() line 30761"},
+    {"name": "solid cylinder inertia", "group": "rotary load", "value": "m R^2 / 2", "unit": "kg m²", "source": "LoadTypeRotary.cs line 1078"},
+    {"name": "hollow cylinder inertia", "group": "rotary load", "value": "m (R^2 + r^2) / 2", "unit": "kg m²", "source": "LoadTypeRotary.cs line 1078"},
+    {"name": "block inertia", "group": "rotary load", "value": "m (3R^2 + L^2) / 12", "unit": "kg m²", "source": "LoadTypeRotary.cs line 1078"},
+    {"name": "peak force", "group": "force", "value": "max(|m A + Ff + Fg + Fo|, |-m A + Ff + Fg + Fo|)", "unit": "N", "source": "calcSingle() lines 25841-25844"},
+    {"name": "RMS force", "group": "force", "value": "sqrt((Fa^2 ta + Fflat^2 tc + Fd^2 td + Fdwell^2 dwell)/(t+dwell))", "unit": "N", "source": "calcSingle() line 25847"},
+    {"name": "gravity component", "group": "force", "value": "m g sin(angle)", "unit": "N", "source": "calcSingle() line 25835"},
+    {"name": "motor count in library", "group": "data", "value": 302, "unit": "models", "source": "app/data/motors.json"}
+  ]
+}

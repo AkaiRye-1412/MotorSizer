@@ -1,0 +1,11 @@
+# Rust build output
+/app/target/
+
+# Bundled local toolchain (referenced by build.cmd / run.cmd, kept on disk only)
+/app/tools/
+
+# Generated selection reports (created on demand by the export button)
+/app/data/reports/
+
+# Local build logs
+/app/*.log
