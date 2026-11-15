@@ -612,7 +612,7 @@ pub fn detail_panel(ui: &mut Ui, state: &AppState, height: f32) {
     // 规格与应用值拆成上下两张独立卡片：中间留出间距，两块边界一眼就能分开；
     // 各自独立滚动，规格表再长也不会把应用值挤到看不见的位置。
     let gap = 12.0;
-    let top_height = ((height - gap) * 0.55).max(0.0);
+    let top_height = ((height - gap) * 0.52).max(0.0);
     let bottom_height = (height - gap - top_height).max(0.0);
 
     c::card_scroll(ui, top_height, "detail_scroll_specs", |ui| {
@@ -670,11 +670,8 @@ pub fn detail_panel(ui: &mut Ui, state: &AppState, height: f32) {
         c::hairline(ui, t::BORDER);
         ui.add_space(4.0);
 
-        c::spec_row(ui, "需求持续值", &format!("{:.3}", sel.need_rms));
-        c::spec_row(ui, "需求峰值", &format!("{:.3}", sel.need_peak));
         c::spec_row(ui, "持续利用率", &format!("{:.1} %", sel.util_cont * 100.0));
         c::spec_row(ui, "峰值利用率", &format!("{:.1} %", sel.util_peak * 100.0));
-        c::spec_row(ui, "实际余量", &format!("{:.1} %", sel.margin_pct));
         c::spec_row(
             ui,
             "安全系数",
