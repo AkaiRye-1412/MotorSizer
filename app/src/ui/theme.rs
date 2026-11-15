@@ -7,10 +7,18 @@ use egui::{
 // ---------- Token ----------
 
 pub const BG: Color32 = Color32::from_rgb(0xF4, 0xF7, 0xFB);
+/// 内容区背景的竖向渐变端点：上浅下略深，让白色卡片有承托感。
+pub const BG_TOP: Color32 = Color32::from_rgb(0xF9, 0xFB, 0xFE);
+pub const BG_BOTTOM: Color32 = Color32::from_rgb(0xEC, 0xF1, 0xF8);
 pub const SURFACE: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
 pub const SURFACE_ALT: Color32 = Color32::from_rgb(0xF8, 0xFA, 0xFC);
 pub const TOPBAR: Color32 = Color32::from_rgb(0x0B, 0x12, 0x20);
 pub const SIDEBAR: Color32 = Color32::from_rgb(0x11, 0x1C, 0x2E);
+/// 顶栏与侧栏的竖向渐变端点：上亮下暗，让深色块有层次而不是一块死黑。
+pub const TOPBAR_TOP: Color32 = Color32::from_rgb(0x16, 0x22, 0x38);
+pub const TOPBAR_BOTTOM: Color32 = Color32::from_rgb(0x08, 0x0E, 0x19);
+pub const SIDEBAR_TOP: Color32 = Color32::from_rgb(0x17, 0x24, 0x3A);
+pub const SIDEBAR_BOTTOM: Color32 = Color32::from_rgb(0x0D, 0x16, 0x26);
 pub const BORDER: Color32 = Color32::from_rgb(0xE2, 0xE8, 0xF0);
 pub const BORDER_STRONG: Color32 = Color32::from_rgb(0xCB, 0xD5, 0xE1);
 
@@ -33,6 +41,28 @@ pub const SIDE_LINE: Color32 = Color32::from_rgb(0x1E, 0x2D, 0x45);
 pub const WHITE_10: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 26);
 
 pub const SHADOW: Color32 = Color32::from_black_alpha(20);
+
+// ---------- 绘制辅助 ----------
+
+/// 在矩形内绘制竖向渐变。egui 的 `Frame::fill` 只支持纯色，
+/// 深色顶栏/侧栏用渐变能拉开明暗层次，看起来更有质感。
+pub fn vgrad(painter: &egui::Painter, rect: egui::Rect, top: Color32, bottom: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(egui::pos2(rect.left(), rect.top()), top);
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.top()), top);
+    mesh.colored_vertex(egui::pos2(rect.left(), rect.bottom()), bottom);
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom()), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(2, 1, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// 把 `color` 按 `amount`(0..1) 混进 `base`，用于生成很淡的强调色底色。
+pub fn tint(base: Color32, color: Color32, amount: f32) -> Color32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| ((a as f32) * (1.0 - amount) + (b as f32) * amount).round() as u8;
+    Color32::from_rgb(mix(base.r(), color.r()), mix(base.g(), color.g()), mix(base.b(), color.b()))
+}
 
 // ---------- 全局样式 ----------
 

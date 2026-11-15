@@ -21,7 +21,12 @@ pub fn show(state: &mut AppState, ui: &mut egui::Ui) {
                 .fill(t::BG)
                 .inner_margin(Margin::symmetric(16, 14)),
         )
-        .show(ui, |ui| content(state, ui));
+        .show(ui, |ui| {
+            // 内容区用极淡的竖向渐变，白色卡片浮在上面时更有层次。
+            let page = ui.clip_rect();
+            t::vgrad(ui.painter(), page, t::BG_TOP, t::BG_BOTTOM);
+            content(state, ui);
+        });
 
     let ctx = ui.ctx().clone();
     super::import_dialog::show(&ctx, state);
@@ -36,6 +41,9 @@ fn top_bar(state: &mut AppState, ui: &mut egui::Ui) {
                 .inner_margin(Margin::symmetric(20, 0)),
         )
         .show(ui, |ui| {
+            // 顶栏用竖向渐变，避免整块死黑；底部再压一条细线收口。
+            let bar = ui.clip_rect();
+            t::vgrad(ui.painter(), bar, t::TOPBAR_TOP, t::TOPBAR_BOTTOM);
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 brand(ui);
                 ui.add_space(26.0);
@@ -75,6 +83,10 @@ fn top_bar(state: &mut AppState, ui: &mut egui::Ui) {
                     }
                 });
             });
+            ui.painter().line_segment(
+                [bar.left_bottom(), bar.right_bottom()],
+                Stroke::new(1.0, t::SIDE_LINE),
+            );
         });
 }
 
@@ -86,10 +98,23 @@ fn brand(ui: &mut egui::Ui) {
     let logo = Vec2::new(size[0] as f32, size[1] as f32);
     // 按固定高度缩放，宽度由原图比例得出，避免底板被拉伸。
     let logo_size = logo * (26.0 / logo.y.max(1.0));
-    let margin = Vec2::new(9.0, 7.0);
+    let margin = Vec2::new(8.0, 6.0);
     let (rect, _) = ui.allocate_exact_size(logo_size + margin * 2.0, Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(8), Color32::WHITE);
+    let radius = CornerRadius::same(10);
+    // 底板下沿垫一层浅投影，让 logo 从深色顶栏里浮起来而不是贴在上面。
+    painter.rect_filled(
+        rect.translate(Vec2::new(0.0, 2.0)).expand(1.0),
+        radius,
+        Color32::from_black_alpha(90),
+    );
+    painter.rect_filled(rect, radius, Color32::WHITE);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 30)),
+        egui::StrokeKind::Inside,
+    );
     painter.image(
         texture.id(),
         Rect::from_min_size(rect.min + margin, logo_size),
@@ -124,6 +149,11 @@ fn side_nav(state: &mut AppState, ui: &mut egui::Ui) {
                 .inner_margin(Margin::symmetric(12, 16)),
         )
         .show(ui, |ui| {
+            // 侧栏同样用渐变，与顶栏的明暗过渡衔接。
+            let nav = ui.clip_rect();
+            t::vgrad(ui.painter(), nav, t::SIDEBAR_TOP, t::SIDEBAR_BOTTOM);
+            ui.painter()
+                .line_segment([nav.right_top(), nav.right_bottom()], Stroke::new(1.0, t::SIDE_LINE));
             ui.label(RichText::new("工作流").size(10.0).color(t::SIDE_MUTED));
             ui.add_space(8.0);
 
@@ -174,6 +204,12 @@ fn status_bar(state: &mut AppState, ui: &mut egui::Ui) {
                 .inner_margin(Margin::symmetric(16, 0)),
         )
         .show(ui, |ui| {
+            // 状态栏与内容区之间用一条细线分隔，避免白色连成一片。
+            let bar = ui.clip_rect();
+            ui.painter().line_segment(
+                [bar.left_top(), bar.right_top()],
+                Stroke::new(1.0, t::BORDER),
+            );
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 let color = if state.computed.errors.is_empty() {
                     t::SUCCESS

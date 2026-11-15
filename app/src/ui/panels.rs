@@ -593,96 +593,107 @@ fn chart_card(
 
 pub fn detail_panel(ui: &mut Ui, state: &AppState, height: f32) {
     let selected = state.computed.selected.clone();
-    c::card_sized(ui, height, |ui| {
-        ScrollArea::vertical()
-            .id_salt("detail_scroll")
-            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                // 详情列使用固定右留白，保证规格值与应用值完整显示。
-                ui.set_width((ui.available_width() - 12.0).max(180.0));
-                ui.spacing_mut().item_spacing.y = 1.0;
-                match selected {
-                    None => {
-                        c::section_title(ui, "电机详情", "未选择");
-                        ui.label(
-                            RichText::new(state.tab.label())
-                                .size(10.5)
-                                .color(t::MUTED),
-                        );
-                        c::hairline(ui, t::BORDER);
-                        ui.add_space(4.0);
-                        c::empty_state(ui, "没有可显示的型号", "先让工况产生推荐结果");
-                    }
-                    Some(sel) => {
-                        let motor = &sel.motor;
-                        let force_unit = if state.tab == Tab::Rotary { "N·m" } else { "N" };
-                        c::section_title(ui, "电机详情", &motor.name);
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                kind_label(motor.kind),
-                                construction_label(motor.construction)
-                            ))
-                            .size(10.5)
-                            .color(t::MUTED),
-                        );
-                        c::hairline(ui, t::BORDER);
+    let Some(sel) = selected else {
+        c::card_scroll(ui, height, "detail_scroll", |ui| {
+            ui.set_width((ui.available_width() - 12.0).max(180.0));
+            c::section_title(ui, "电机详情", "未选择");
+            ui.label(
+                RichText::new(state.tab.label())
+                    .size(10.5)
+                    .color(t::MUTED),
+            );
+            c::hairline(ui, t::BORDER);
+            ui.add_space(4.0);
+            c::empty_state(ui, "没有可显示的型号", "先让工况产生推荐结果");
+        });
+        return;
+    };
 
-                        c::group_label(ui, "规格");
-                        c::spec_row(ui, "型号", &motor.name);
-                        c::spec_row(ui, "类型", kind_label(motor.kind));
-                        c::spec_row(ui, "冷却", construction_label(motor.construction));
-                        c::spec_row(ui, "持续能力", &format!("{} {force_unit}", fmt(motor.cont)));
-                        c::spec_row(ui, "峰值能力", &format!("{} {force_unit}", fmt(motor.peak)));
-                        c::spec_row(ui, "电机常数", &format!("{:.3}", motor.km));
-                        c::spec_row(ui, "力/力矩常数", &format!("{:.3}", motor.kf));
-                        c::spec_row(ui, "反电动势常数", &format!("{:.3}", motor.ke));
-                        // 电流统一用 Arms（安培有效值）：样册的 Icn/Ipk 均以 Arms
-                        // 给出；若数据源是 A（峰值安培），按 Arms = A/1.414 换算。
-                        c::spec_row(ui, "连续电流", &format!("{:.2} Arms", motor.i_cont));
-                        c::spec_row(ui, "峰值电流", &format!("{:.2} Arms", motor.i_peak));
-                        c::spec_row(ui, "相电阻", &format!("{:.3} Ω", motor.resist));
-                        c::spec_row(ui, "相电感", &format!("{:.3} mH", motor.induct));
-                        c::spec_row(ui, "额定功率", &format!("{:.1} W", motor.rated_w));
-                        c::spec_row(ui, "最大功率", &format!("{:.1} W", motor.max_w));
-                        if state.tab == Tab::Rotary {
-                            c::spec_row(ui, "转子惯量", &format!("{:.5} kg·m²", motor.inertia));
-                            c::spec_row(ui, "最高转速", &format!("{:.0} rpm", motor.max_speed));
-                        } else {
-                            c::spec_row(ui, "动子质量", &format!("{:.3} kg", motor.mover_mass));
-                            c::spec_row(ui, "线圈长度", &format!("{:.1} mm", motor.length));
-                            c::spec_row(ui, "最高速度", &format!("{:.2} m/s", motor.max_speed));
-                        }
+    // 规格与应用值拆成上下两张独立卡片：中间留出间距，两块边界一眼就能分开；
+    // 各自独立滚动，规格表再长也不会把应用值挤到看不见的位置。
+    let gap = 12.0;
+    let top_height = ((height - gap) * 0.55).max(0.0);
+    let bottom_height = (height - gap - top_height).max(0.0);
 
-                        c::group_label(ui, "应用值");
-                        c::spec_row(ui, "需求持续值", &format!("{:.3}", sel.need_rms));
-                        c::spec_row(ui, "需求峰值", &format!("{:.3}", sel.need_peak));
-                        c::spec_row(ui, "持续利用率", &format!("{:.1} %", sel.util_cont * 100.0));
-                        c::spec_row(ui, "峰值利用率", &format!("{:.1} %", sel.util_peak * 100.0));
-                        c::spec_row(ui, "实际余量", &format!("{:.1} %", sel.margin_pct));
-                        c::spec_row(
-                            ui,
-                            "安全系数",
-                            &format!("{:.2}×", state.inputs.safety_factor()),
-                        );
-                        if motor.kf.abs() > 1e-9 {
-                            c::spec_row(
-                                ui,
-                                "估算持续电流",
-                                &format!("{:.2} Arms", sel.need_rms / motor.kf),
-                            );
-                            c::spec_row(
-                                ui,
-                                "估算峰值电流",
-                                &format!("{:.2} Arms", sel.need_peak / motor.kf),
-                            );
-                        }
+    c::card_scroll(ui, top_height, "detail_scroll_specs", |ui| {
+        // 详情列使用固定右留白，保证规格值完整显示。
+        ui.set_width((ui.available_width() - 12.0).max(180.0));
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let motor = &sel.motor;
+        let force_unit = if state.tab == Tab::Rotary { "N·m" } else { "N" };
+        c::section_title(ui, "电机详情", &motor.name);
+        ui.label(
+            RichText::new(format!(
+                "{} · {}",
+                kind_label(motor.kind),
+                construction_label(motor.construction)
+            ))
+            .size(10.5)
+            .color(t::MUTED),
+        );
+        c::hairline(ui, t::BORDER);
 
-                        drive_section(ui, state);
-                    }
-                }
-            });
+        c::group_label(ui, "规格");
+        c::spec_row(ui, "型号", &motor.name);
+        c::spec_row(ui, "类型", kind_label(motor.kind));
+        c::spec_row(ui, "冷却", construction_label(motor.construction));
+        c::spec_row(ui, "持续能力", &format!("{} {force_unit}", fmt(motor.cont)));
+        c::spec_row(ui, "峰值能力", &format!("{} {force_unit}", fmt(motor.peak)));
+        c::spec_row(ui, "电机常数", &format!("{:.3}", motor.km));
+        c::spec_row(ui, "力/力矩常数", &format!("{:.3}", motor.kf));
+        c::spec_row(ui, "反电动势常数", &format!("{:.3}", motor.ke));
+        // 电流统一用 Arms（安培有效值）：样册的 Icn/Ipk 均以 Arms
+        // 给出；若数据源是 A（峰值安培），按 Arms = A/1.414 换算。
+        c::spec_row(ui, "连续电流", &format!("{:.2} Arms", motor.i_cont));
+        c::spec_row(ui, "峰值电流", &format!("{:.2} Arms", motor.i_peak));
+        c::spec_row(ui, "相电阻", &format!("{:.3} Ω", motor.resist));
+        c::spec_row(ui, "相电感", &format!("{:.3} mH", motor.induct));
+        c::spec_row(ui, "额定功率", &format!("{:.1} W", motor.rated_w));
+        c::spec_row(ui, "最大功率", &format!("{:.1} W", motor.max_w));
+        if state.tab == Tab::Rotary {
+            c::spec_row(ui, "转子惯量", &format!("{:.5} kg·m²", motor.inertia));
+            c::spec_row(ui, "最高转速", &format!("{:.0} rpm", motor.max_speed));
+        } else {
+            c::spec_row(ui, "动子质量", &format!("{:.3} kg", motor.mover_mass));
+            c::spec_row(ui, "线圈长度", &format!("{:.1} mm", motor.length));
+            c::spec_row(ui, "最高速度", &format!("{:.2} m/s", motor.max_speed));
+        }
+    });
+
+    ui.add_space(gap);
+
+    c::card_scroll(ui, bottom_height, "detail_scroll_app", |ui| {
+        ui.set_width((ui.available_width() - 12.0).max(180.0));
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let motor = &sel.motor;
+        c::section_title(ui, "应用值", "");
+        c::hairline(ui, t::BORDER);
+        ui.add_space(4.0);
+
+        c::spec_row(ui, "需求持续值", &format!("{:.3}", sel.need_rms));
+        c::spec_row(ui, "需求峰值", &format!("{:.3}", sel.need_peak));
+        c::spec_row(ui, "持续利用率", &format!("{:.1} %", sel.util_cont * 100.0));
+        c::spec_row(ui, "峰值利用率", &format!("{:.1} %", sel.util_peak * 100.0));
+        c::spec_row(ui, "实际余量", &format!("{:.1} %", sel.margin_pct));
+        c::spec_row(
+            ui,
+            "安全系数",
+            &format!("{:.2}×", state.inputs.safety_factor()),
+        );
+        if motor.kf.abs() > 1e-9 {
+            c::spec_row(
+                ui,
+                "估算持续电流",
+                &format!("{:.2} Arms", sel.need_rms / motor.kf),
+            );
+            c::spec_row(
+                ui,
+                "估算峰值电流",
+                &format!("{:.2} Arms", sel.need_peak / motor.kf),
+            );
+        }
+
+        drive_section(ui, state);
     });
 }
 

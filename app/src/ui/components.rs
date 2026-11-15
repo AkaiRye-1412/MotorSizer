@@ -10,13 +10,13 @@ pub fn card_sized(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
     Frame::NONE
         .fill(t::SURFACE)
         .stroke(Stroke::new(1.0, t::BORDER))
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(CornerRadius::same(14))
         .inner_margin(Margin::same(16))
         .shadow(Shadow {
-            offset: [0, 5],
-            blur: 18,
+            offset: [0, 6],
+            blur: 22,
             spread: 0,
-            color: t::SHADOW,
+            color: Color32::from_black_alpha(26),
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -25,8 +25,40 @@ pub fn card_sized(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
         });
 }
 
+/// 带独立滚动区的定高卡片。
+///
+/// 与 `card_sized` 的区别是给内部 ScrollArea 设了 `max_height`：
+/// 滚动区默认会向上撑开到父容器剩余高度，多张卡片叠放时会把下面的卡片挤出可视区。
+pub fn card_scroll(ui: &mut Ui, height: f32, id: &str, add: impl FnOnce(&mut Ui)) {
+    Frame::NONE
+        .fill(t::SURFACE)
+        .stroke(Stroke::new(1.0, t::BORDER))
+        .corner_radius(CornerRadius::same(14))
+        .inner_margin(Margin::same(16))
+        .shadow(Shadow {
+            offset: [0, 6],
+            blur: 22,
+            spread: 0,
+            color: Color32::from_black_alpha(26),
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let inner_height = (height - 32.0).max(60.0);
+            egui::ScrollArea::vertical()
+                .id_salt(id)
+                .max_height(inner_height)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .auto_shrink([false, false])
+                .show(ui, add);
+        });
+}
+
 pub fn section_title(ui: &mut Ui, title: &str, hint: &str) {
     ui.horizontal(|ui| {
+        // 标题前加一小段强调色竖条，替代了单纯的文字标题，视觉上更像卡片头。
+        let (bar, _) = ui.allocate_exact_size(Vec2::new(3.0, 14.0), Sense::hover());
+        ui.painter().rect_filled(bar, CornerRadius::same(2), t::ACCENT);
+        ui.add_space(3.0);
         ui.label(RichText::new(title).size(15.0).strong().color(t::TEXT));
         if !hint.is_empty() {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -51,20 +83,29 @@ pub fn hairline(ui: &mut Ui, color: Color32) {
 }
 
 pub fn kpi(ui: &mut Ui, label: &str, value: &str, unit: &str, accent: Color32) {
-    Frame::NONE
-        .fill(t::SURFACE_ALT)
-        .stroke(Stroke::new(1.0, t::BORDER))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::symmetric(12, 10))
+    let response = Frame::NONE
+        // 底色是白底极淡地混入该项的强调色，四项并排时各自有辨识度又不刺眼。
+        .fill(t::tint(t::SURFACE, accent, 0.05))
+        .stroke(Stroke::new(1.0, t::tint(t::BORDER, accent, 0.35)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::symmetric(14, 11))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(label).size(11.0).color(t::MUTED));
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(value).size(23.0).strong().color(t::TEXT));
+                ui.label(RichText::new(value).size(24.0).strong().color(t::TEXT));
                 ui.label(RichText::new(unit).size(10.0).color(accent));
             });
-        });
+        })
+        .response;
+    // 左侧 3px 强调条，让指标卡有“标签页”一样的识别度。
+    let rect = response.rect;
+    ui.painter().rect_filled(
+        egui::Rect::from_center_size(egui::pos2(rect.left() + 3.0, rect.center().y), Vec2::new(3.0, 22.0)),
+        CornerRadius::same(2),
+        accent,
+    );
 }
 
 pub fn badge(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) {

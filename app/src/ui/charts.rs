@@ -20,7 +20,13 @@ pub fn line_chart(
     let height = ui.available_height().max(120.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, egui::CornerRadius::same(8), t::SURFACE_ALT);
+    painter.rect_filled(rect, egui::CornerRadius::same(10), t::SURFACE_ALT);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(10),
+        Stroke::new(1.0, t::BORDER),
+        egui::StrokeKind::Inside,
+    );
 
     if samples.len() < 2 {
         painter.text(
@@ -59,12 +65,16 @@ pub fn line_chart(
     let y_of = |y: f64| plot.bottom() - ((y - y_min) / (y_max - y_min)) as f32 * plot.height();
 
     // 网格与刻度：横纵轴都标注数值，避免只显示两端而无法读数。
+    // 网格线用比边框更淡的颜色，避免和折线抢视觉。
+    let grid = Stroke::new(1.0, t::tint(t::SURFACE_ALT, t::BORDER, 0.55));
     let mut value = y_min;
     while value <= y_max + y_step * 0.5 {
         let y = y_of(value);
+        painter.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], grid);
+        // 左侧小刻度，方便从数值对齐到网格线。
         painter.line_segment(
-            [pos2(plot.left(), y), pos2(plot.right(), y)],
-            Stroke::new(1.0, t::BORDER),
+            [pos2(plot.left() - 4.0, y), pos2(plot.left(), y)],
+            Stroke::new(1.0, t::BORDER_STRONG),
         );
         painter.text(
             pos2(plot.left() - 6.0, y),
@@ -80,10 +90,7 @@ pub fn line_chart(
     for i in 0..=X_TICKS {
         let ratio = i as f32 / X_TICKS as f32;
         let x = plot.left() + plot.width() * ratio;
-        painter.line_segment(
-            [pos2(x, plot.top()), pos2(x, plot.bottom())],
-            Stroke::new(1.0, t::BORDER),
-        );
+        painter.line_segment([pos2(x, plot.top()), pos2(x, plot.bottom())], grid);
         let time = t_max * ratio as f64;
         let align = match i {
             0 => Align2::LEFT_TOP,
@@ -112,15 +119,6 @@ pub fn line_chart(
         }
         let x = x_of(mark.time);
         dashed_vline(&painter, x, plot.top(), plot.bottom());
-        if !mark.label.is_empty() {
-            painter.text(
-                pos2(x + 3.0, plot.top() + 1.0),
-                Align2::LEFT_TOP,
-                &mark.label,
-                FontId::proportional(9.0),
-                t::MUTED,
-            );
-        }
     }
 
     // 零线
@@ -132,24 +130,39 @@ pub fn line_chart(
         );
     }
 
-    // 面积填充：用密集竖线近似，支持正负力且不受凹多边形限制。
+    // 面积填充：从零线向曲线做竖向渐变（底部近乎透明、贴近曲线处较实），
+    // 比整块纯色更有体积感；正负力分别向零线两侧填充。
     let zero_y = y_of(0.0).clamp(plot.top(), plot.bottom());
-    let fill = color.gamma_multiply(0.10);
-    let bar_width = (plot.width() / samples.len() as f32).max(1.0);
-    for (x, y) in samples {
-        let px = x_of(*x);
-        painter.line_segment(
-            [pos2(px, zero_y), pos2(px, y_of(*y))],
-            Stroke::new(bar_width, fill),
-        );
-    }
+    gradient_area(&painter, samples, &x_of, &y_of, zero_y, color);
 
     // 折线
     let points: Vec<Pos2> = samples
         .iter()
         .map(|(x, y)| pos2(x_of(*x), y_of(*y)))
         .collect();
-    painter.add(Shape::line(points, Stroke::new(2.0, color)));
+    painter.add(Shape::line(points, Stroke::new(2.2, color)));
+
+    // 阶段标签放在最后绘制，避免被折线或面积填充盖住。
+    for mark in marks {
+        if mark.time <= 0.0 || mark.time >= t_max || mark.label.is_empty() {
+            continue;
+        }
+        let x = x_of(mark.time);
+        let galley =
+            painter.layout_no_wrap(mark.label.clone(), FontId::proportional(9.0), t::TEXT_2);
+        let chip = Rect::from_min_size(
+            pos2(x + 3.0, plot.top() + 1.0),
+            galley.size() + egui::vec2(8.0, 3.0),
+        );
+        painter.rect_filled(chip, egui::CornerRadius::same(4), t::SURFACE);
+        painter.rect_stroke(
+            chip,
+            egui::CornerRadius::same(4),
+            Stroke::new(1.0, t::BORDER),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(chip.min + egui::vec2(4.0, 1.5), galley, t::TEXT_2);
+    }
 
     painter.text(
         plot.left_top() + egui::vec2(2.0, -2.0),
@@ -158,6 +171,32 @@ pub fn line_chart(
         FontId::proportional(10.0),
         t::MUTED,
     );
+}
+
+/// 曲线与零线之间的渐变填充；每段用两个三角形拼出梯形，顶点颜色不同形成渐变。
+fn gradient_area(
+    painter: &egui::Painter,
+    samples: &[(f64, f64)],
+    x_of: &impl Fn(f64) -> f32,
+    y_of: &impl Fn(f64) -> f32,
+    zero_y: f32,
+    color: Color32,
+) {
+    let near_curve = color.gamma_multiply(0.26);
+    let near_zero = color.gamma_multiply(0.02);
+    let mut mesh = egui::Mesh::default();
+    for pair in samples.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        let index = mesh.vertices.len() as u32;
+        mesh.colored_vertex(pos2(x_of(x0), zero_y), near_zero);
+        mesh.colored_vertex(pos2(x_of(x1), zero_y), near_zero);
+        mesh.colored_vertex(pos2(x_of(x0), y_of(y0)), near_curve);
+        mesh.colored_vertex(pos2(x_of(x1), y_of(y1)), near_curve);
+        mesh.add_triangle(index, index + 1, index + 2);
+        mesh.add_triangle(index + 2, index + 1, index + 3);
+    }
+    painter.add(Shape::mesh(mesh));
 }
 
 fn dashed_vline(painter: &egui::Painter, x: f32, top: f32, bottom: f32) {
