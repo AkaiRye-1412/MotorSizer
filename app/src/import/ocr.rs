@@ -196,6 +196,14 @@ fn run_script(
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // 发布版是 GUI 子系统，直接 spawn 控制台程序会弹出一个蓝色 PowerShell 窗口。
+    // CREATE_NO_WINDOW 只让子进程不分配控制台，标准输入输出仍走上面的管道。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| format!("无法启动 Windows OCR：{error}"))?;
