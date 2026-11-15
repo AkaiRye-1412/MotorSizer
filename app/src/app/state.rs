@@ -945,8 +945,16 @@ mod tests {
     }
 
     #[test]
-    fn default_selection_has_drive_candidates() {
-        let state = state();
+    fn drive_matching_uses_motor_and_app_current() {
+        let mut state = state();
+        // 内置驱动器已按用户要求移除；测试注入合成条目验证匹配与余量。
+        state.drives = vec![Drive {
+            name: "TEST-DC".to_owned(),
+            cont: 1000.0,
+            peak: 2000.0,
+            voltage: 400.0,
+            phase: 2,
+        }];
         let matches = state.matched_drives();
         assert!(!matches.is_empty(), "默认工况应有可匹配驱动器");
         // 默认母线 310 V / 2 相，候选必须同时满足电压与相数。
@@ -983,8 +991,25 @@ mod tests {
     #[test]
     fn drive_phase_setting_filters_candidates() {
         let mut state = state();
+        state.drives = vec![
+            Drive {
+                name: "TEST-DC-2PH".to_owned(),
+                cont: 1000.0,
+                peak: 2000.0,
+                voltage: 400.0,
+                phase: 2,
+            },
+            Drive {
+                name: "TEST-DC-3PH".to_owned(),
+                cont: 1000.0,
+                peak: 2000.0,
+                voltage: 400.0,
+                phase: 3,
+            },
+        ];
         state.drive_settings.phase = 3;
         let matches = state.matched_drives();
+        assert!(!matches.is_empty());
         assert!(matches.iter().all(|m| m.drive.phase == 3));
     }
 

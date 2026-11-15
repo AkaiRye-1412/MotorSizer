@@ -5,8 +5,9 @@
 //! - 发布构建：可执行文件同目录 `data/motors.db`
 //! - 环境变量 `MOTORSIZER_DB` 可覆盖以上路径
 //!
-//! 数据库不存在时会从内嵌的 `motors.json` / `drives.json` 自动建库导入；
-//! 存在时只读载入，之后所有界面查询都使用内存中的数据。
+//! 数据库不存在时会从内嵌的 `motors.json` 自动建库导入（驱动器表建好但
+//! 保持为空，内置驱动器清单已移除）；存在时只读载入，之后所有界面查询
+//! 都使用内存中的数据。
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +27,6 @@ const SCHEMA_VERSION: i64 = 2;
 const KIND_REPAIR_KEY: &str = "kind_repair_ironcore_v1";
 
 const MOTORS_JSON: &str = include_str!("../../data/motors.json");
-const DRIVES_JSON: &str = include_str!("../../data/drives.json");
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE motors (
@@ -327,8 +327,6 @@ fn repair_motor_kinds(conn: &mut Connection) -> Result<usize, String> {
 fn seed(conn: &mut Connection) -> Result<(), String> {
     let motors_json: Vec<Value> =
         serde_json::from_str(MOTORS_JSON).map_err(|error| format!("内置电机资料解析失败：{error}"))?;
-    let drives_json: Vec<Value> =
-        serde_json::from_str(DRIVES_JSON).map_err(|error| format!("内置驱动器资料解析失败：{error}"))?;
 
     let tx = conn.transaction().map_err(sql_error)?;
     for value in &motors_json {
@@ -347,37 +345,10 @@ fn seed(conn: &mut Connection) -> Result<(), String> {
         .map_err(sql_error)?;
     }
 
-    // 资料库中有重复驱动器记录，按「名称 + 电压 + 相数」去重。
-    let mut inserted: Vec<(String, i64, u32)> = Vec::new();
-    for value in &drives_json {
-        let name = text(value, "name");
-        if name.is_empty() {
-            continue;
-        }
-        let voltage = number(value, &["voltage"]);
-        let phase = number(value, &["phase"]).round() as u32;
-        let key = (name.clone(), (voltage * 100.0).round() as i64, phase);
-        if inserted.contains(&key) {
-            continue;
-        }
-        inserted.push(key);
-        tx.execute(
-            "INSERT INTO drives (family, name, cont, peak, voltage, phase)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                text(value, "family"),
-                name,
-                number(value, &["cont"]),
-                number(value, &["peak"]),
-                voltage,
-                phase,
-            ],
-        )
-        .map_err(sql_error)?;
-    }
-
+    // 驱动器表保留为空：内置资料里的驱动器清单不再导入，用户按实际
+    // 选型结果自行维护（表结构保留，便于以后增加导入功能）。
     tx.execute(
-        "INSERT INTO meta (key, value) VALUES ('seed_source', 'embedded motors.json + drives.json')",
+        "INSERT INTO meta (key, value) VALUES ('seed_source', 'embedded motors.json')",
         [],
     )
     .map_err(sql_error)?;
@@ -667,25 +638,8 @@ mod tests {
             .count();
         assert_eq!(linear, 232, "直线电机数量");
         assert_eq!(rotary, 70, "旋转电机数量");
-        assert_eq!(catalog.drives.len(), 41, "驱动器去重后数量");
-        assert_eq!(
-            catalog
-                .drives
-                .iter()
-                .filter(|d| d.name == "MT-4/12-DC")
-                .count(),
-            1,
-            "重复驱动器记录应被去重"
-        );
-
-        // 原始资料把该型号的电压与相数写反了；导入后必须是 48 V / 3 相。
-        let solwhi = catalog
-            .drives
-            .iter()
-            .find(|d| d.name == "SOLWHI-2.5/60")
-            .expect("SOLWHI-2.5/60");
-        assert_eq!(solwhi.voltage, 48.0);
-        assert_eq!(solwhi.phase, 3);
+        // 内置驱动器清单已按用户要求移除；驱动器表保留但为空。
+        assert!(catalog.drives.is_empty(), "不再导入内置驱动器");
 
         // ACD120-80-Y 的 Motor Type 写成了 MoMotor Type，应识别为旋转电机。
         let acd = catalog
@@ -727,27 +681,24 @@ mod tests {
     }
 
     #[test]
-    fn version_one_database_repairs_swapped_drive_fields() {
+    fn version_one_database_is_migrated_without_reseeding() {
         let path = temp_db("migrate");
-        load_at(&path).expect("首次建库");
+        let first = load_at(&path).expect("首次建库");
         {
             let conn = Connection::open(&path).expect("打开测试库");
-            conn.execute_batch(
-                "PRAGMA user_version = 1;
-                 UPDATE drives SET voltage = 3.0, phase = 48
-                 WHERE name = 'SOLWHI-2.5/60';",
-            )
-            .expect("还原 v1 数据");
+            conn.execute_batch("PRAGMA user_version = 1")
+                .expect("还原 v1 版本号");
         }
         let catalog = load_at(&path).expect("迁移后载入");
         assert!(!catalog.seeded, "迁移不应重建数据库");
-        let drive = catalog
-            .drives
-            .iter()
-            .find(|d| d.name == "SOLWHI-2.5/60")
-            .expect("SOLWHI-2.5/60");
-        assert_eq!(drive.voltage, 48.0);
-        assert_eq!(drive.phase, 3);
+        assert_eq!(catalog.motors.len(), first.motors.len(), "电机记录应保留");
+        assert!(catalog.drives.is_empty(), "驱动器表保持为空");
+        let version: i64 = {
+            let conn = Connection::open(&path).expect("打开测试库");
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("读取版本号")
+        };
+        assert_eq!(version, SCHEMA_VERSION, "版本号应升级到当前结构");
         let _ = std::fs::remove_file(&path);
     }
 
