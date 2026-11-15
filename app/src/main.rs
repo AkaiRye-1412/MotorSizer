@@ -1,9 +1,14 @@
+// 发布版使用 GUI 子系统：双击 exe 时不再弹出黑色控制台窗口。
+// 调试版保留控制台，便于查看 panic 和运行日志。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod data;
 mod domain;
 mod import;
 mod ui;
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use eframe::egui;
@@ -34,7 +39,8 @@ fn main() -> eframe::Result<()> {
                 Some("rotary") => app::Tab::Rotary,
                 Some("linear") | None => app::Tab::Linear,
                 Some(other) => {
-                    eprintln!("未知页面：{other}（可选 linear / rotary）");
+                    // GUI 子系统下可能没有控制台，写日志失败不应导致崩溃。
+                    let _ = writeln!(std::io::stderr(), "未知页面：{other}（可选 linear / rotary）");
                     std::process::exit(2);
                 }
             };
@@ -46,16 +52,18 @@ fn main() -> eframe::Result<()> {
         let mut state = match app::AppState::new() {
             Ok(state) => state,
             Err(error) => {
-                eprintln!("无法载入数据：{error}");
+                let _ = writeln!(std::io::stderr(), "无法载入数据：{error}");
                 std::process::exit(2);
             }
         };
         state.set_tab(tab);
         state.recompute_if_dirty();
         match app::report::export_to(&state, &dir) {
-            Ok(path) => println!("{}", path.display()),
+            Ok(path) => {
+                let _ = writeln!(std::io::stdout(), "{}", path.display());
+            }
             Err(error) => {
-                eprintln!("{error}");
+                let _ = writeln!(std::io::stderr(), "{error}");
                 std::process::exit(3);
             }
         }

@@ -775,6 +775,9 @@ impl AppState {
         };
         let motor = &selected.motor;
         // 应用电流 = 需求力/力矩 ÷ 力/力矩常数（已包含安全系数）。
+        // kf 以 N·m/Arms 给出，因此这里得到的电流与电机/驱动器的 Arms
+        // 额定值同一口径；若某份资料给的是 A（峰值安培），先按
+        // Arms = A / 1.414 换算再录入。
         let (app_cont, app_peak) = if motor.kf.abs() > 1e-9 {
             (selected.need_rms / motor.kf, selected.need_peak / motor.kf)
         } else {

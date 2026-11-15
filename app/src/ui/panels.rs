@@ -638,8 +638,10 @@ pub fn detail_panel(ui: &mut Ui, state: &AppState, height: f32) {
                         c::spec_row(ui, "电机常数", &format!("{:.3}", motor.km));
                         c::spec_row(ui, "力/力矩常数", &format!("{:.3}", motor.kf));
                         c::spec_row(ui, "反电动势常数", &format!("{:.3}", motor.ke));
-                        c::spec_row(ui, "连续电流", &format!("{:.2} A", motor.i_cont));
-                        c::spec_row(ui, "峰值电流", &format!("{:.2} A", motor.i_peak));
+                        // 电流统一用 Arms（安培有效值）：样册的 Icn/Ipk 均以 Arms
+                        // 给出；若数据源是 A（峰值安培），按 Arms = A/1.414 换算。
+                        c::spec_row(ui, "连续电流", &format!("{:.2} Arms", motor.i_cont));
+                        c::spec_row(ui, "峰值电流", &format!("{:.2} Arms", motor.i_peak));
                         c::spec_row(ui, "相电阻", &format!("{:.3} Ω", motor.resist));
                         c::spec_row(ui, "相电感", &format!("{:.3} mH", motor.induct));
                         c::spec_row(ui, "额定功率", &format!("{:.1} W", motor.rated_w));
@@ -668,12 +670,12 @@ pub fn detail_panel(ui: &mut Ui, state: &AppState, height: f32) {
                             c::spec_row(
                                 ui,
                                 "估算持续电流",
-                                &format!("{:.2} A", sel.need_rms / motor.kf),
+                                &format!("{:.2} Arms", sel.need_rms / motor.kf),
                             );
                             c::spec_row(
                                 ui,
                                 "估算峰值电流",
-                                &format!("{:.2} A", sel.need_peak / motor.kf),
+                                &format!("{:.2} Arms", sel.need_peak / motor.kf),
                             );
                         }
 
@@ -752,7 +754,7 @@ fn drive_row(ui: &mut Ui, item: &crate::domain::drive::DriveMatch) {
     });
     ui.label(
         RichText::new(format!(
-            "持续 {:.1} A / 峰值 {:.1} A · {:.0} V · {} 相",
+            "持续 {:.1} Arms / 峰值 {:.1} Arms · {:.0} V · {} 相",
             item.drive.cont, item.drive.peak, item.drive.voltage, item.drive.phase
         ))
         .size(9.5)

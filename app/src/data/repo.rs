@@ -425,9 +425,8 @@ fn read_motors(conn: &Connection) -> Result<Vec<Motor>, String> {
     let motors = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql_error)?;
-    if motors.is_empty() {
-        return Err("数据库中没有电机记录，请删除数据库文件后重新启动以重新导入。".to_owned());
-    }
+    // 允许空库：用户可以把电机全部删除后再通过导入功能逐条添加。
+    // 界面用“没有匹配型号”的空状态提示，不应因此拒绝载入整个数据库。
     Ok(motors)
 }
 

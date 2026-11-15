@@ -4,9 +4,9 @@
 #[derive(Clone, Debug)]
 pub struct Drive {
     pub name: String,
-    /// 持续电流 A
+    /// 持续电流 Arms（安培有效值）
     pub cont: f64,
-    /// 峰值电流 A
+    /// 峰值电流 Arms
     pub peak: f64,
     /// 额定母线电压 V
     pub voltage: f64,
@@ -42,7 +42,7 @@ pub struct DriveMatch {
 
 /// 按应用电流需求匹配驱动器。
 ///
-/// - `need_cont` / `need_peak` 为已乘安全系数的应用电流（A）；
+/// - `need_cont` / `need_peak` 为已乘安全系数的应用电流（Arms）；
 /// - 驱动器必须在持续与峰值两段都不低于需求；
 /// - 额定母线电压需不低于所选母线电压，相数必须一致；
 /// - 结果按电流余量降序，余量相同时取电流更小的型号（更经济）。

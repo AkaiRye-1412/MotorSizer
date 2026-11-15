@@ -2,4 +2,5 @@
 
 pub mod ocr;
 pub mod parse;
+pub mod pdftext;
 pub mod workflow;

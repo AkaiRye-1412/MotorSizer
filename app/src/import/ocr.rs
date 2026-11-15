@@ -164,6 +164,7 @@ pub fn recognize_batch(
     cancel: &Path,
     workspace: &Path,
     progress: &dyn Fn(Progress),
+    stage: &str,
 ) -> Result<OcrDoc, String> {
     let out = workspace.join("batch.ndjson");
     let script = script_path()?;
@@ -175,7 +176,7 @@ pub fn recognize_batch(
         "-CancelFile".to_owned(),
         cancel.display().to_string(),
     ];
-    run_script(&script, &args, cancel, progress, "识别参数")
+    run_script(&script, &args, cancel, progress, stage)
         .map_err(|error| error_with_sidecar(&out, error))?;
     parse_doc(&out)
 }
@@ -420,6 +421,19 @@ pub fn resize(image: &RgbaImage, scale: f64) -> RgbaImage {
     let w = ((image.width() as f64 * scale).round() as u32).max(1);
     let h = ((image.height() as f64 * scale).round() as u32).max(1);
     imageops::resize(image, w, h, imageops::FilterType::Triangle)
+}
+
+/// 在图像四周添加白色留白。Windows OCR 对紧贴裁剪边缘的单个数字经常
+/// 直接丢弃（整列裁剪里的 3.3、4.7 就属于这种情况）；留白后识别稳定。
+pub fn pad_white(image: &RgbaImage, margin: u32) -> RgbaImage {
+    let (w, h) = image.dimensions();
+    let mut out = RgbaImage::from_pixel(
+        w + margin * 2,
+        h + margin * 2,
+        image::Rgba([255, 255, 255, 255]),
+    );
+    imageops::overlay(&mut out, image, margin as i64, margin as i64);
+    out
 }
 
 pub fn save_png(image: &RgbaImage, path: &Path) -> Result<(), String> {

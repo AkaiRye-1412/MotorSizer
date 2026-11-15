@@ -321,20 +321,45 @@ fn preview_page(ui: &mut egui::Ui, preview: &mut workflow::Preview, selected: &m
 
     let total = preview.candidates.len();
     let mut current = (*selected).min(total - 1);
-    let included = preview
+    let mut included = preview
         .candidates
         .iter()
         .filter(|candidate| candidate.include)
         .count();
     let overwrites = preview.overwrite_count();
 
-    ui.label(
-        RichText::new(format!(
-            "候选 {total} 个 · 勾选 {included} 个 · 同名覆盖 {overwrites} 个"
-        ))
-        .size(11.5)
-        .color(t::TEXT_2),
-    );
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "候选 {total} 个 · 勾选 {included} 个 · 同名覆盖 {overwrites} 个"
+            ))
+            .size(11.5)
+            .color(t::TEXT_2),
+        );
+        ui.add_space(12.0);
+        // 三态“全选”：部分勾选时显示 indeterminate，点击后整体
+        // 切换为全选/全不选，便于一次导入整页型号。
+        let all = included == total;
+        let mut checked = all;
+        let response = ui.add(
+            egui::Checkbox::new(
+                &mut checked,
+                RichText::new("全选").size(11.5).color(t::TEXT_2),
+            )
+            .indeterminate(included > 0 && !all),
+        );
+        if response.clicked() {
+            for candidate in &mut preview.candidates {
+                candidate.include = checked;
+            }
+        }
+    });
+    // 同一帧内刷新数量，避免底部“导入 N 个型号”滞后一帧。
+    included = preview
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.include)
+        .count();
     ui.add_space(6.0);
 
     ui.horizontal_top(|ui| {
@@ -494,7 +519,8 @@ fn editor(ui: &mut egui::Ui, preview: &mut workflow::Preview, index: usize) {
     let rotary = motor.kind == MotorKind::Rotary;
 
     let cont_unit = if rotary { "N·m" } else { "N" };
-    let kf_unit = if rotary { "N·m/A" } else { "N/A" };
+    // 样册里的力/转矩常数以 N·m/Arms 给出，与电流字段的 Arms 单位一致。
+    let kf_unit = if rotary { "N·m/Arms" } else { "N/Arms" };
     let ke_unit = if rotary { "V/(rad/s)" } else { "V/(m/s)" };
     let km_unit = if rotary { "N·m/√W" } else { "N/√W" };
     let speed_unit = if rotary { "rpm" } else { "m/s" };
@@ -518,11 +544,11 @@ fn editor(ui: &mut egui::Ui, preview: &mut workflow::Preview, index: usize) {
     changed |= field_row(
         ui,
         ("相间电感", "mH", &mut motor.induct, 0.01, 4),
-        ("持续电流", "A", &mut motor.i_cont, 0.01, 3),
+        ("持续电流", "Arms", &mut motor.i_cont, 0.01, 3),
     );
     changed |= field_row(
         ui,
-        ("峰值电流", "A", &mut motor.i_peak, 0.01, 3),
+        ("峰值电流", "Arms", &mut motor.i_peak, 0.01, 3),
         ("持续热功率", "W", &mut motor.rated_w, 0.1, 3),
     );
     changed |= field_row(

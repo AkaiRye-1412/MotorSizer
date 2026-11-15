@@ -283,8 +283,8 @@ fn render(state: &AppState) -> String {
         line!("| 电机常数 | {:.3} |", motor.km);
         line!("| 力/力矩常数 | {:.3} |", motor.kf);
         line!("| 反电动势常数 | {:.3} |", motor.ke);
-        line!("| 连续电流 | {:.2} A |", motor.i_cont);
-        line!("| 峰值电流 | {:.2} A |", motor.i_peak);
+        line!("| 连续电流 | {:.2} Arms |", motor.i_cont);
+        line!("| 峰值电流 | {:.2} Arms |", motor.i_peak);
         line!("| 相电阻 | {:.3} Ω |", motor.resist);
         line!("| 相电感 | {:.3} mH |", motor.induct);
         line!("| 额定功率 | {:.1} W |", motor.rated_w);
@@ -309,8 +309,8 @@ fn render(state: &AppState) -> String {
         line!("| 实际余量 | {:.1}% |", selected.margin_pct);
         line!("| 安全系数 | {:.2}× |", state.inputs.safety_factor());
         if motor.kf.abs() > 1e-9 {
-            line!("| 估算持续电流 | {:.2} A |", selected.need_rms / motor.kf);
-            line!("| 估算峰值电流 | {:.2} A |", selected.need_peak / motor.kf);
+            line!("| 估算持续电流 | {:.2} Arms |", selected.need_rms / motor.kf);
+            line!("| 估算峰值电流 | {:.2} Arms |", selected.need_peak / motor.kf);
         }
     } else {
         line!("当前没有选中的型号。");
@@ -333,7 +333,7 @@ fn render(state: &AppState) -> String {
         line!("| --- | --- | --- | --- | --- | --- |");
         for item in drives.iter().take(10) {
             line!(
-                "| {} | {:.1} A | {:.1} A | {:.0} V | {} 相 | {:.0}% |",
+                "| {} | {:.1} Arms | {:.1} Arms | {:.0} V | {} 相 | {:.0}% |",
                 item.drive.name,
                 item.drive.cont,
                 item.drive.peak,

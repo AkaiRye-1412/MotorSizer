@@ -35,10 +35,12 @@ pub struct Motor {
     pub peak: f64,
     /// 电机常数：直线 N/√W；旋转 N·m/√W
     pub km: f64,
-    /// 力常数 N/A（直线）或转矩常数 N·m/A（旋转）
+    /// 力常数 N/Arms（直线）或转矩常数 N·m/Arms（旋转）
     pub kf: f64,
     /// 反电动势常数 V/(m/s)（直线）或 V/(rad/s)（旋转）
     pub ke: f64,
+    /// 持续/峰值电流，单位 Arms（安培有效值）；若资料给的是 A（峰值安培），
+    /// 按 Arms = A / 1.414 换算后再录入。
     pub i_cont: f64,
     pub i_peak: f64,
     pub induct: f64, // mH

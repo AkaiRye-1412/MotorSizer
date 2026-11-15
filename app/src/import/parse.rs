@@ -73,6 +73,7 @@ impl Field {
 /// 例如“最高转速@持续转矩”同时包含两个别名，应归为转速。
 const ALIASES: &[(&str, Field)] = &[
     ("最高转速", Field::MaxSpeed),
+    ("最高速度", Field::MaxSpeed),
     ("持续转矩", Field::Cont),
     ("峰值转矩", Field::Peak),
     ("转矩常数", Field::Kf),
@@ -86,6 +87,13 @@ const ALIASES: &[(&str, Field)] = &[
     ("线圈质量", Field::Mass),
     ("动子质量", Field::Mass),
     ("转子质量", Field::Mass),
+    // 旋转直驱样册的机械参数表用“总质量（自冷）”描述整机质量。
+    ("总质量", Field::Mass),
+    // OCR 常把“总质量”识成“灬质量/灬质里/灬人里”；具体的“线圈质量”
+    // 等别名排在上面，因此这些宽松别名只作为兜底。
+    ("质量", Field::Mass),
+    ("质里", Field::Mass),
+    ("人里", Field::Mass),
     ("线圈长度", Field::Length),
     ("转动惯量", Field::Inertia),
     ("转子惯量", Field::Inertia),
@@ -100,6 +108,39 @@ pub fn field_of_label(text: &str) -> Option<Field> {
         .iter()
         .find(|(alias, _)| joined.contains(alias))
         .map(|(_, field)| *field)
+}
+
+/// 识别串联/并联子表头。子表头是短标签（“串联”“并联”“串联接法”），
+/// 而图题“转矩-转速曲线 AXD120-71 串联接法”是一整句；只按文字长度
+/// 区分二者，避免把图题当成参数列标题。
+fn connection_label(text: &str) -> Option<&'static str> {
+    let joined: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if joined.chars().count() > 6 {
+        return None;
+    }
+    match (joined.contains('串'), joined.contains('并')) {
+        (true, false) => Some("S"),
+        (false, true) => Some("P"),
+        _ => None,
+    }
+}
+
+/// 型号标题里允许出现的非字母数字符号；注意中文破折号“一”也可能是
+/// 连字符误识别，其余汉字则说明这是一句图题而不是型号。
+fn is_model_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '一' | '－' | '–' | '—' | '−' | '-' | '·' | '•' | '.' | '．' | '/' | '／' | ' '
+    )
+}
+
+fn contains_chinese(text: &str) -> bool {
+    text.chars().any(|ch| {
+        if is_model_punctuation(ch) {
+            return false;
+        }
+        matches!(ch, '\u{3400}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -141,11 +182,87 @@ pub enum PassKind {
         scale: f64,
         weight: u32,
     },
+    /// 单行条带裁剪图，用于补扫整列识别漏掉的个别数值行。
+    /// `x0`/`top` 是裁剪图左上角在页面中的坐标，`scale_x`/`scale_y`
+    /// 是裁剪图相对页面的缩放（裁剪可能同时放大，宽高缩放相同）。
+    Band {
+        x0: f64,
+        top: f64,
+        scale_x: f64,
+        scale_y: f64,
+        weight: u32,
+    },
+    /// 单个单元格的高倍放大裁剪图。整列/整行裁剪时 Windows OCR 偶尔会
+    /// 丢掉小数点甚至整段数字（例如把 3.3 读成 33），单独裁剪单元格并
+    /// 留白后识别率最高；因此该通道不参与坐标匹配，只取离 `y` 最近且
+    /// 在 `tolerance` 内的那一行，命中即视为该单元格的独立读数，优先
+    /// 于其他通道。`y`/`tolerance` 是裁剪图（放大后）中的像素坐标。
+    Cell {
+        column: usize,
+        row: usize,
+        y: f64,
+        tolerance: f64,
+        weight: u32,
+    },
+    /// PDF 文本层整页。数值位置来自文本层，本身是精确的；但列中心
+    /// 来自 OCR 识别出的子表头，宽表格里可能和数值实际位置有几十像素
+    /// 偏差（按最近距离会把左列数值分到右列）。因此该通道按“同一行内
+    /// 按 x 从左到右”顺序分配给各列，而不是逐行找最近列。
+    Text { weight: u32 },
 }
 
 pub struct Pass<'a> {
     pub sheet: &'a OcrSheet,
     pub kind: PassKind,
+}
+
+/// 一次识别得到的候选值。除数值和权重外，记录原文中有多少位有效数字、
+/// 是否带小数点：单元格通道的读数不一定可靠（Windows OCR 会把
+/// 18.5 读成“1 & 5”、把 150.3 读成“1503”），用这两项质量指标来判断
+/// 该信哪一个通道。
+#[derive(Clone, Copy)]
+struct Observation {
+    value: f64,
+    weight: u32,
+    digits: u32,
+    dotted: bool,
+}
+
+impl Observation {
+    fn new(value: f64, weight: u32, text: &str) -> Self {
+        let mut digits = 0;
+        let mut dotted = false;
+        for ch in text.chars() {
+            match ch {
+                '0'..='9'
+                | '\u{FF10}'..='\u{FF19}'
+                | 'O'
+                | 'o'
+                | 'Q'
+                | 'I'
+                | 'l'
+                | '|' => digits += 1,
+                '.' | '\u{FF0E}' | ',' | '\u{FF0C}' => dotted = true,
+                _ => {}
+            }
+        }
+        Self {
+            value,
+            weight,
+            digits,
+            dotted,
+        }
+    }
+
+    /// 质量排序键：有效数字更多者优先；数量相同则带小数点者优先。
+    fn rank(&self) -> (u32, bool) {
+        (self.digits, self.dotted)
+    }
+}
+
+/// 两个数值是否落在 `merge` 使用的同一容差内。
+fn same_value(left: f64, right: f64) -> bool {
+    (left - right).abs() <= (left.abs() * 0.006).max(0.02)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -254,18 +371,15 @@ pub fn detect_table(sheet: &OcrSheet) -> Option<PageTable> {
         rotary_hint = true;
     }
 
-    // 2. 串联/并联子表头。
+    // 2. 串联/并联子表头。只接受“串联/并联/串联接法”这类短标签；
+    //    右侧转矩-转速图题里也含“串联接法”，但那是整句，不能当列标题，
+    //    否则会凭空多出列并把 header_bottom 拉到图题位置，所有数据行被过滤。
     let mut subs: Vec<(f64, f64, String)> = Vec::new();
     for line in &sheet.lines {
         if line.words.is_empty() || line.min_x() < width * 0.28 {
             continue;
         }
-        let joined = line.joined();
-        let connection = if joined.contains('串') && !joined.contains('并') {
-            "S"
-        } else if joined.contains('并') && !joined.contains('串') {
-            "P"
-        } else {
+        let Some(connection) = connection_label(&line.joined()) else {
             continue;
         };
         let x = line.center_x();
@@ -396,7 +510,13 @@ fn header_candidates(sheet: &OcrSheet, bottom: f64, band: f64) -> Vec<(String, f
         if y > bottom || y < bottom - band {
             continue;
         }
-        let name = clean_header(&line.joined());
+        let text = line.joined();
+        // 图题“转矩-转速曲线 AXD120-71 串联接法”清洗后也能得到
+        // AXD120-71，但它不是列标题；含汉字的整句直接排除。
+        if contains_chinese(&text) {
+            continue;
+        }
+        let name = clean_header(&text);
         if !is_model_like(&name) {
             continue;
         }
@@ -424,7 +544,9 @@ pub fn clean_header(text: &str) -> String {
             ch
         };
         let mapped = match half {
-            'һ' | '－' | '–' | '—' | '−' | '一' => '-',
+            // 型号里的分隔符常被识别成破折号、中点或句点（AXD280·100），
+            // 统一折成连字符，才能匹配数据库中的 AXD280-100。
+            'һ' | '－' | '–' | '—' | '−' | '一' | '·' | '•' | '.' | '．' | '/' | '／' => '-',
             other => other,
         };
         if mapped.is_ascii_alphanumeric() || mapped == '-' {
@@ -495,15 +617,62 @@ pub fn compose_name(header: &str, connection: &str, rotary: bool) -> Option<Stri
 
 /// 收集所有识别通道的候选值。每个候选带权重，合并时按簇取最高权重。
 pub fn collect(table: &PageTable, passes: &[Pass]) -> Vec<Recognized> {
-    let mut candidates: Vec<Vec<(f64, u32)>> =
+    let mut candidates: Vec<Vec<Observation>> =
+        (0..table.columns.len() * Field::COUNT).map(|_| Vec::new()).collect();
+    // 单元格通道的读数单独存放：它只包含一个单元格，行列直接已知，
+    // 不受整列扫描丢字/丢小数点的影响。
+    let mut cell_candidates: Vec<Vec<Observation>> =
         (0..table.columns.len() * Field::COUNT).map(|_| Vec::new()).collect();
 
     for pass in passes {
+        if let PassKind::Text { weight } = pass.kind {
+            collect_text(pass.sheet, table, weight, &mut candidates);
+            continue;
+        }
+        // 单元格通道：只取该格预期位置附近最近的一行数值。裁剪窗口两侧
+        // 可能夹带相邻行（尤其是未被表头识别的行），按坐标取最近一行
+        // 可以避免把邻居的数值记到这一格。
+        if let PassKind::Cell {
+            column,
+            row,
+            y,
+            tolerance,
+            weight,
+        } = pass.kind
+        {
+            if column >= table.columns.len() || row >= table.rows.len() {
+                continue;
+            }
+            let mut nearest: Option<(f64, Observation)> = None;
+            for line in &pass.sheet.lines {
+                if line.words.is_empty() {
+                    continue;
+                }
+                let distance = (line.center_y() - y).abs();
+                if distance > tolerance {
+                    continue;
+                }
+                let text = line.joined();
+                let Some(value) = parse_number(&text) else {
+                    continue;
+                };
+                if nearest.map(|(best, _)| distance < best).unwrap_or(true) {
+                    nearest = Some((distance, Observation::new(value, weight, &text)));
+                }
+            }
+            if let Some((_, observation)) = nearest {
+                let field = table.rows[row].field;
+                cell_candidates[field.index() * table.columns.len() + column]
+                    .push(observation);
+            }
+            continue;
+        }
         for line in &pass.sheet.lines {
             if line.words.is_empty() {
                 continue;
             }
-            let Some(value) = parse_number(&line.joined()) else {
+            let text = line.joined();
+            let Some(value) = parse_number(&text) else {
                 continue;
             };
             let (y, x) = match pass.kind {
@@ -514,6 +683,22 @@ pub fn collect(table: &PageTable, passes: &[Pass]) -> Vec<Recognized> {
                     let scale = scale.max(0.01);
                     (line.center_y() / scale, line.center_x() / scale)
                 }
+                PassKind::Band {
+                    x0,
+                    top,
+                    scale_x,
+                    scale_y,
+                    ..
+                } => {
+                    let scale_x = scale_x.max(0.01);
+                    let scale_y = scale_y.max(0.01);
+                    (
+                        line.center_y() / scale_y + top,
+                        line.center_x() / scale_x + x0,
+                    )
+                }
+                // 单元格与文本层通道已在上面单独处理，不会走到这里。
+                PassKind::Cell { .. } | PassKind::Text { .. } => continue,
             };
             if y < table.header_bottom + 4.0 || y > table.bottom + 12.0 {
                 continue;
@@ -521,6 +706,10 @@ pub fn collect(table: &PageTable, passes: &[Pass]) -> Vec<Recognized> {
             let Some(row_index) = nearest_row(table, y) else {
                 continue;
             };
+            // 结果按字段枚举下标存放；行在页面上的顺序与字段枚举顺序
+            // 不一定一致（“最高转速”排在“转动惯量”前后都可能），
+            // 用 row_index 存会让 MaxSpeed/Inertia 等字段永远取不到值。
+            let field = table.rows[row_index].field;
             let index = match pass.kind {
                 PassKind::Column { column, weight, .. } => {
                     if column >= table.columns.len() {
@@ -528,23 +717,19 @@ pub fn collect(table: &PageTable, passes: &[Pass]) -> Vec<Recognized> {
                     }
                     Some((column, weight))
                 }
-                PassKind::Full { weight, .. } => {
-                    let mut best: Option<(usize, f64)> = None;
-                    for (col, column) in table.columns.iter().enumerate() {
-                        let distance = (column.center_x - x).abs();
-                        if distance <= table.column_tolerance
-                            && best.map(|(_, d)| distance < d).unwrap_or(true)
-                        {
-                            best = Some((col, distance));
-                        }
-                    }
-                    best.map(|(col, _)| (col, weight))
+                // 整页和单行条带都按 x 坐标落到最近的列；条带的 x 坐标
+                // 已经映射回页面坐标系，因此两者可以共用同一套逻辑。
+                PassKind::Full { weight, .. } | PassKind::Band { weight, .. } => {
+                    nearest_column(table, x).map(|col| (col, weight))
                 }
+                // 单元格与文本层通道不会走到这里。
+                PassKind::Cell { .. } | PassKind::Text { .. } => continue,
             };
             let Some((column, weight)) = index else {
                 continue;
             };
-            candidates[row_index * table.columns.len() + column].push((value, weight));
+            candidates[field.index() * table.columns.len() + column]
+                .push(Observation::new(value, weight, &text));
         }
     }
 
@@ -553,13 +738,93 @@ pub fn collect(table: &PageTable, passes: &[Pass]) -> Vec<Recognized> {
         let mut recognized = Recognized::default();
         for field in Field::ALL {
             let cell = field.index() * table.columns.len() + column;
-            let (value, conflict) = merge(&candidates[cell]);
+            let (value, conflict) = decide(&candidates[cell], &cell_candidates[cell]);
             recognized.values[field.index()] = value;
             recognized.conflict[field.index()] = conflict;
         }
         out.push(recognized);
     }
     out
+}
+
+/// 文本层整页收集：按行分组，行内按 x 顺序对应到各列。
+fn collect_text(
+    sheet: &OcrSheet,
+    table: &PageTable,
+    weight: u32,
+    candidates: &mut [Vec<Observation>],
+) {
+    let mut rows: Vec<Vec<(f64, Observation)>> = vec![Vec::new(); table.rows.len()];
+    for line in &sheet.lines {
+        if line.words.is_empty() {
+            continue;
+        }
+        let text = line.joined();
+        let Some(value) = parse_number(&text) else {
+            continue;
+        };
+        let y = line.center_y();
+        let x = line.center_x();
+        if y < table.header_bottom + 4.0 || y > table.bottom + 12.0 {
+            continue;
+        }
+        let Some(row_index) = nearest_row(table, y) else {
+            continue;
+        };
+        // 只接收贴近数值列的读数：左侧标签（如“转矩常数±10%”）和
+        // 右侧曲线/图纸标注里的数字不能混进表格。
+        let limit = (table.column_tolerance * 1.5).max(60.0);
+        if table
+            .columns
+            .iter()
+            .all(|column| (column.center_x - x).abs() > limit)
+        {
+            continue;
+        }
+        rows[row_index].push((x, Observation::new(value, weight, &text)));
+    }
+
+    let mut order: Vec<usize> = (0..table.columns.len()).collect();
+    order.sort_by(|a, b| table.columns[*a].center_x.total_cmp(&table.columns[*b].center_x));
+
+    for (row_index, mut values) in rows.into_iter().enumerate() {
+        if values.is_empty() {
+            continue;
+        }
+        values.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let field = table.rows[row_index].field;
+        if values.len() == order.len() {
+            // 每一列都恰好一个数值：按从左到右的顺序一一对应，不受
+            // 列中心与数值实际位置偏差的影响。
+            for (slot, (_, observation)) in values.into_iter().enumerate() {
+                candidates[field.index() * table.columns.len() + order[slot]].push(observation);
+            }
+            continue;
+        }
+        // 数量对不上（缺列或有多余读数）时只在距离足够近时按最近列
+        // 归类，宁缺毋滥，避免把左列数值错记到右列。
+        let near = table.column_tolerance * 0.5;
+        for (x, observation) in values {
+            if let Some(column) = nearest_column(table, x) {
+                if (table.columns[column].center_x - x).abs() <= near {
+                    candidates[field.index() * table.columns.len() + column].push(observation);
+                }
+            }
+        }
+    }
+}
+
+fn nearest_column(table: &PageTable, x: f64) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (col, column) in table.columns.iter().enumerate() {
+        let distance = (column.center_x - x).abs();
+        if distance <= table.column_tolerance
+            && best.map(|(_, d)| distance < d).unwrap_or(true)
+        {
+            best = Some((col, distance));
+        }
+    }
+    best.map(|(col, _)| col)
 }
 
 fn nearest_row(table: &PageTable, y: f64) -> Option<usize> {
@@ -602,6 +867,58 @@ pub fn merge(candidates: &[(f64, u32)]) -> (Option<f64>, bool) {
     (best.map(|(value, _, _)| value), conflict)
 }
 
+/// 合并普通通道（整页/整列/条带）与单元格通道的读数。
+///
+/// 两个通道各有所长：整列裁剪给出的数字通常完整，但会丢小数点
+/// （3.3 被读成 33、150.3 被读成 1503）；单元格裁剪留白后小数点稳定，
+/// 但偶尔会把 18.5 读成“1 & 5”。因此不按通道权重硬性取舍，而是先让
+/// 每个通道各自选出质量最高的读数，再比较质量（有效数字位数、是否带
+/// 小数点）：质量高者胜出；质量相同时单元格通道优先，若数值仍不同
+/// 则标记冲突提示用户核对。
+fn decide(other: &[Observation], cell: &[Observation]) -> (Option<f64>, bool) {
+    let pairs: Vec<(f64, u32)> = other.iter().map(|o| (o.value, o.weight)).collect();
+    let (other_value, other_conflict) = merge(&pairs);
+
+    let best_cell = cell
+        .iter()
+        .max_by(|a, b| a.rank().cmp(&b.rank()).then(a.weight.cmp(&b.weight)));
+    let cell_conflict = best_cell
+        .map(|best| {
+            cell.iter()
+                .any(|o| !same_value(o.value, best.value) && o.rank() == best.rank())
+        })
+        .unwrap_or(false);
+
+    let Some(best) = best_cell else {
+        return (other_value, other_conflict);
+    };
+    let Some(other_value) = other_value else {
+        return (Some(best.value), cell_conflict);
+    };
+    if same_value(best.value, other_value) {
+        return (Some(best.value), cell_conflict || other_conflict);
+    }
+
+    // 普通通道里支持 `other_value` 的读数中质量最高者；若一个都对不上
+    // （聚类均值偏离所有成员），视为质量最低。
+    let other_quality = other
+        .iter()
+        .filter(|o| same_value(o.value, other_value))
+        .max_by(|a, b| a.rank().cmp(&b.rank()).then(a.weight.cmp(&b.weight)));
+    let ordering = match other_quality {
+        Some(quality) => best
+            .rank()
+            .cmp(&quality.rank())
+            .then(best.weight.cmp(&quality.weight)),
+        None => std::cmp::Ordering::Greater,
+    };
+    match ordering {
+        std::cmp::Ordering::Greater => (Some(best.value), cell_conflict),
+        std::cmp::Ordering::Less => (Some(other_value), other_conflict),
+        std::cmp::Ordering::Equal => (Some(best.value), true),
+    }
+}
+
 /// OCR 数字归一化：全角标点、误识别的“口/丿/t”、千位空格、单位后缀。
 pub fn parse_number(text: &str) -> Option<f64> {
     let mut source: String = text
@@ -627,6 +944,18 @@ pub fn parse_number(text: &str) -> Option<f64> {
             source = format!("5.{rest}");
         }
     }
+    // 前缀“L”常是“1.”的误识别（“L24”应为 1.24）。
+    if let Some(rest) = source.strip_prefix('L') {
+        if rest.len() >= 2
+            && rest
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_digit())
+                .unwrap_or(false)
+        {
+            source = format!("1.{rest}");
+        }
+    }
 
     // 值必须以数字或已知形近字开头；型号文本（AUM1-S1）不能变成“1”。
     let first = source.chars().next()?;
@@ -643,8 +972,12 @@ pub fn parse_number(text: &str) -> Option<f64> {
     let mut after_exponent = false;
     for (index, &ch) in chars.iter().enumerate() {
         let next = chars.get(index + 1).copied();
-        // “2t0”常见于“21.0”中 1 与小数点粘连的误识别。
-        if ch == 't' && last_digit && next.map(|n| n.is_ascii_digit()).unwrap_or(false) {
+        // “2t0”“1L9”“5L1”常见于“21.0”“11.9”“51.1”中
+        // 小数点与数字 1 粘连的误识别。
+        if (ch == 't' || ch == 'L')
+            && last_digit
+            && next.map(|n| n.is_ascii_digit()).unwrap_or(false)
+        {
             buffer.push_str("1.");
             last_digit = false;
             continue;
@@ -660,6 +993,38 @@ pub fn parse_number(text: &str) -> Option<f64> {
             seen_digit = true;
             last_digit = true;
             after_exponent = false;
+            continue;
+        }
+        // 科学记数法里的 E 常被识成“巳/已”（4.15E-03 写成
+        // “4.15巳03”）。只有后面紧跟符号时才可还原；若后面直接是
+        // 指数数字，说明负号也丢了，无法判断正负——宁可放弃该行，
+        // 也不要得到 4150 这种离谱值。
+        if last_digit && matches!(ch, '巳' | '已') {
+            if next.map(|n| n.is_ascii_digit()).unwrap_or(false) {
+                return None;
+            }
+            buffer.push('e');
+            last_digit = false;
+            after_exponent = true;
+            continue;
+        }
+        // “彐/彑”无法可靠归一化：它可能是小数点，也可能整体替换了
+        // “15”中的字符（“4.15E-03”被识成“4彐5E-03”）。此时若按
+        // 普通结束符截断，会得到 4.0 这类错误值；宁可放弃该行，留给
+        // 更高分辨率的补扫通道。
+        if matches!(ch, '彐' | '彑') {
+            return None;
+        }
+        // 指数符号也经常被 OCR 成小数点、间隔号或破折号：E·03、E．03、
+        // E一03 都应还原为 E-03。此时后面必须紧跟指数数字，否则按普通
+        // 字符结束解析，避免“E”后无数字时产生半截浮点数。
+        if after_exponent
+            && !last_digit
+            && next.map(|n| n.is_ascii_digit()).unwrap_or(false)
+        {
+            if ch != '+' {
+                buffer.push('-');
+            }
             continue;
         }
         let separator = matches!(ch, '.' | ',' | '，' | '、' | '．' | '。' | '·' | ':' | '；' | ';');
@@ -682,8 +1047,17 @@ pub fn parse_number(text: &str) -> Option<f64> {
             last_digit = false;
             continue;
         }
-        // 单位、中文说明等：数字结束后立即停止。
+        // 单位、中文说明等：数字结束后立即停止。但如果剩余文本里还有
+        // E/e 指数标记，说明整段科学记数法被 OCR 打散（5.15E-01 被识成
+        // “5 xx xx E 一 01”），截断只会得到 5.0 这种错误值；放弃整行，
+        // 交给逐格通道重新识别。
         if seen_digit {
+            if chars[index..]
+                .iter()
+                .any(|rest| matches!(rest, 'e' | 'E' | '巳' | '已' | 'ｅ' | 'Ｅ'))
+            {
+                return None;
+            }
             break;
         }
     }
@@ -790,6 +1164,112 @@ mod tests {
         sheet(800.0, 800.0, lines)
     }
 
+    /// AXD 样册页：左侧参数标签，右侧串联/并联两列数值，表格右侧另有
+    /// 转矩-转速图题（同一行里含型号和“串联接法/并联接法”）。
+    fn datasheet_with_chart_titles() -> OcrSheet {
+        let mut lines = vec![
+            // 型号标题中的“．”是印刷体中点，OCR 可能识别成句点。
+            line(vec![
+                word("AXD280", 646.0, 424.0, 110.0),
+                word("．", 766.0, 424.0, 20.0),
+                word("100", 790.0, 424.0, 60.0),
+            ]),
+            line(vec![word("串联", 1055.0, 473.0, 40.0)]),
+            line(vec![word("并联", 1174.0, 473.0, 40.0)]),
+            line(vec![
+                word("转矩一转速曲线", 1633.0, 520.0, 600.0),
+                word("AXD280一100", 2250.0, 520.0, 100.0),
+                word("串联接法", 2360.0, 520.0, 60.0),
+            ]),
+            line(vec![
+                word("转矩一转速曲线", 1633.0, 1010.0, 600.0),
+                word("AXD280一100", 2250.0, 1010.0, 100.0),
+                word("并联接法", 2360.0, 1010.0, 60.0),
+            ]),
+        ];
+        for (i, (name, series, parallel)) in [
+            ("持续转矩", "5.0", "2.5"),
+            ("峰值转矩", "10.0", "5.0"),
+            ("转矩常数", "0.26", "0.13"),
+            ("反电势常数", "0.5", "0.25"),
+            ("电机常数", "0.14", "0.07"),
+            ("相间电阻", "1.7", "0.85"),
+            ("相间电感", "6.2", "3.1"),
+            ("持续电流", "1.7", "3.4"),
+            ("峰值电流", "6.8", "13.6"),
+            ("持续热功率", "21.0", "42.0"),
+            ("最高转速@持续转矩", "1700", "2000"),
+            ("转动惯量", "0.001", "0.001"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let y = 509.0 + i as f64 * 38.0;
+            lines.push(label(name, y));
+            lines.push(cell(series, 1085.0, y));
+            lines.push(cell(parallel, 1205.0, y));
+        }
+        sheet(2700.0, 3583.0, lines)
+    }
+
+    #[test]
+    fn text_pass_uses_row_order_when_columns_are_shifted() {
+        // 模拟宽列样册（如 324 页目录的 AXD 页）：子表头位置在列左缘，
+        // 数值整体右移后更靠近右侧列的中心，按“最近列”会分错。
+        let mut sample = datasheet_with_chart_titles();
+        for line in &mut sample.lines {
+            for word in &mut line.words {
+                if (word.x - 1065.0).abs() < 0.5 {
+                    word.x += 85.0;
+                }
+                if (word.x - 1185.0).abs() < 0.5 {
+                    word.x += 105.0;
+                }
+            }
+        }
+        let table = detect_table(&sample).expect("应识别参数表");
+        let recognized = collect(
+            &table,
+            &[Pass {
+                sheet: &sample,
+                kind: PassKind::Text { weight: 1 },
+            }],
+        );
+        assert_eq!(recognized[0].value(Field::Cont), Some(5.0), "串联列");
+        assert_eq!(recognized[1].value(Field::Cont), Some(2.5), "并联列");
+        assert_eq!(recognized[0].value(Field::Kf), Some(0.26));
+        assert_eq!(recognized[1].value(Field::ICont), Some(3.4));
+    }
+
+    #[test]
+    fn chart_titles_do_not_become_columns_or_hide_values() {
+        let sample = datasheet_with_chart_titles();
+        let table = detect_table(&sample).expect("应识别参数表");
+        assert!(table.rotary);
+        assert_eq!(table.columns.len(), 2, "图题不能生成额外的串联/并联列");
+        assert_eq!(table.columns[0].name, "AXD280-100-S");
+        assert_eq!(table.columns[1].name, "AXD280-100-P");
+        assert!(
+            table.header_bottom < table.rows[0].center_y,
+            "表头下沿必须在第一行数据之上"
+        );
+
+        let recognized = collect(
+            &table,
+            &[Pass {
+                sheet: &sample,
+                kind: PassKind::Full { weight: 1, scale: 1.0 },
+            }],
+        );
+        assert_eq!(recognized[0].value(Field::Cont), Some(5.0));
+        assert_eq!(recognized[0].value(Field::Peak), Some(10.0));
+        assert_eq!(recognized[0].value(Field::Kf), Some(0.26));
+        assert_eq!(recognized[1].value(Field::ICont), Some(3.4));
+        // MaxSpeed/Inertia 在页面上排在其它字段之后，必须按字段下标归位。
+        assert_eq!(recognized[1].value(Field::MaxSpeed), Some(2000.0));
+        assert_eq!(recognized[0].value(Field::Inertia), Some(0.001));
+    }
+
     #[test]
     fn detects_linear_two_connection_columns() {
         let table = detect_table(&linear_two_columns()).expect("应识别参数表");
@@ -815,6 +1295,9 @@ mod tests {
         assert_eq!(clean_header("AUMI -SI"), "AUM1-S1");
         assert_eq!(clean_header("ADRI10һA75"), "ADR110-A75");
         assert_eq!(clean_header("ＡＤＲ110－Ａ75"), "ADR110-A75");
+        // 样册常用中点分隔型号（AXD280·100），OCR 也可能输出句点。
+        assert_eq!(clean_header("AXD280·100"), "AXD280-100");
+        assert_eq!(clean_header("AXD280 ． 100"), "AXD280-100");
     }
 
     #[test]
@@ -823,12 +1306,77 @@ mod tests {
         assert_eq!(parse_number("12 口 8"), Some(12.8));
         assert_eq!(parse_number("s18"), Some(5.18));
         assert_eq!(parse_number("3．086E一04"), Some(0.0003086));
+        // 科学记数法的负号/字母常被识成间隔号、句点或汉字“巳”。
+        assert_eq!(parse_number("4，15E·03"), Some(0.00415));
+        assert_eq!(parse_number("4．15E一03"), Some(0.00415));
+        assert_eq!(parse_number("4 ． 15 巳 03"), None);
+        assert_eq!(parse_number("1.18E．03"), Some(0.00118));
+        // 符号保留时仍可还原汉字 E。
+        assert_eq!(parse_number("4 ． 15 巳 一 03"), Some(0.00415));
+        // 无法还原的“彐”会让数字半途截断，必须放弃整行而不是误报 4.0。
+        assert_eq!(parse_number("4 彐 5E 一 03"), None);
         assert_eq!(parse_number("6.8 Arms"), Some(6.8));
+        // 被 OCR 打散的科学记数法不能在首个乱码处截断成 5.0。
+        assert_eq!(parse_number("5口口E一01"), None);
         assert_eq!(parse_number("2t0"), Some(21.0));
+        assert_eq!(parse_number("1L9"), Some(11.9));
+        assert_eq!(parse_number("5L1"), Some(51.1));
+        assert_eq!(parse_number("L24"), Some(1.24));
+        assert_eq!(parse_number("L90"), Some(1.90));
         assert_eq!(parse_number("100"), Some(100.0));
         assert_eq!(parse_number("N/Arms"), None);
         assert_eq!(parse_number("AUM1-S1"), None);
         assert_eq!(parse_number(""), None);
+    }
+
+    #[test]
+    fn cell_pass_overrides_decimal_lost_by_column_crop() {
+        let mut sample = datasheet_with_chart_titles();
+        // 模拟整页/整列通道把并联电阻 0.85 读成 33（小数点和首位都丢失）。
+        let index = sample
+            .lines
+            .iter()
+            .position(|line| line.text == "0.85")
+            .expect("样表应含并联电阻 0.85");
+        sample.lines[index] = cell("33", 1205.0, 699.0);
+        let table = detect_table(&sample).expect("应识别参数表");
+
+        let whole_page = collect(
+            &table,
+            &[Pass {
+                sheet: &sample,
+                kind: PassKind::Full { weight: 1, scale: 1.0 },
+            }],
+        );
+        assert_eq!(whole_page[1].value(Field::Resist), Some(33.0));
+
+        // 单元格通道只给正确读数；它存在时应完全覆盖低分辨率通道，
+        // 且不把“33”当成冲突。
+        let cell_sheet = sheet(2700.0, 3583.0, vec![cell("3.3", 200.0, 100.0)]);
+        let recognized = collect(
+            &table,
+            &[
+                Pass {
+                    sheet: &sample,
+                    kind: PassKind::Full { weight: 1, scale: 1.0 },
+                },
+                Pass {
+                    sheet: &cell_sheet,
+                    kind: PassKind::Cell {
+                        column: 1,
+                        row: 5,
+                        y: 100.0,
+                        tolerance: 100.0,
+                        weight: 2,
+                    },
+                },
+            ],
+        );
+        assert_eq!(recognized[1].value(Field::Resist), Some(3.3));
+        assert!(
+            !recognized[1].has_conflict(Field::Resist),
+            "单元格通道是权威读数，不应产生冲突"
+        );
     }
 
     #[test]
@@ -909,5 +1457,56 @@ mod tests {
         assert_eq!(recognized.len(), 2);
         assert!((recognized[1].value(Field::Peak).unwrap() - 11.9).abs() < 0.001);
         assert!(recognized[0].value(Field::Cont).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn band_pass_recovers_row_dropped_by_column_passes() {
+        let mut page = linear_two_columns();
+        // 模拟 Windows OCR 整页/整列识别漏掉“持续推力”这一行。
+        page.lines
+            .retain(|line| !line.words.iter().any(|w| w.text == "3.0"));
+
+        let table = detect_table(&page).expect("应识别参数表");
+        let missing = collect(
+            &table,
+            &[Pass {
+                sheet: &page,
+                kind: PassKind::Full { weight: 1, scale: 1.0 },
+            }],
+        );
+        assert!(missing[0].value(Field::Cont).is_none());
+        assert!(missing[1].value(Field::Cont).is_none());
+
+        // 4 倍放大的单行条带：裁剪左上角在页面 (360, 175)，宽 320、高 30。
+        // OCR 坐标映射回页面后应分别落到串联列 (x≈420) 和并联列 (x≈620)。
+        let band = sheet(
+            1280.0,
+            120.0,
+            vec![
+                cell("3.0", 240.0, 69.0),
+                cell("11.9", 1040.0, 69.0),
+            ],
+        );
+        let recognized = collect(
+            &table,
+            &[
+                Pass {
+                    sheet: &page,
+                    kind: PassKind::Full { weight: 1, scale: 1.0 },
+                },
+                Pass {
+                    sheet: &band,
+                    kind: PassKind::Band {
+                        x0: 360.0,
+                        top: 175.0,
+                        scale_x: 4.0,
+                        scale_y: 4.0,
+                        weight: 3,
+                    },
+                },
+            ],
+        );
+        assert!((recognized[0].value(Field::Cont).unwrap() - 3.0).abs() < 0.001);
+        assert!((recognized[1].value(Field::Cont).unwrap() - 11.9).abs() < 0.001);
     }
 }
