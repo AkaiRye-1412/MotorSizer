@@ -1,5 +1,5 @@
 use egui::{
-    pos2, Align, Color32, CornerRadius, Frame, Layout, Margin, Panel, RichText, Sense, Shape,
+    pos2, Align, Color32, CornerRadius, Frame, Layout, Margin, Panel, Rect, RichText, Sense,
     Stroke, Vec2,
 };
 
@@ -79,48 +79,40 @@ fn top_bar(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn brand(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
-        let painter = ui.painter_at(rect);
-        let center = rect.center();
-        painter.rect_filled(
-            rect.shrink(1.0),
-            CornerRadius::same(9),
-            Color32::from_rgb(0x16, 0x27, 0x42),
-        );
-        painter.add(Shape::convex_polygon(
-            vec![
-                pos2(center.x, center.y - 9.0),
-                pos2(center.x + 9.0, center.y),
-                pos2(center.x, center.y + 9.0),
-                pos2(center.x - 9.0, center.y),
-            ],
-            t::ACCENT,
-            Stroke::NONE,
-        ));
-        painter.add(Shape::convex_polygon(
-            vec![
-                pos2(center.x, center.y - 3.5),
-                pos2(center.x + 3.5, center.y),
-                pos2(center.x, center.y + 3.5),
-                pos2(center.x - 3.5, center.y),
-            ],
-            t::TOPBAR,
-            Stroke::NONE,
-        ));
+    // Akribis logo 是深蓝字 + 青色三角，直接放在深色顶栏上文字会看不清，
+    // 因此外面套一块白色圆角底板，logo 本身保持品牌原色不做改色。
+    let texture = logo_texture(ui.ctx());
+    let size = texture.size();
+    let logo = Vec2::new(size[0] as f32, size[1] as f32);
+    // 按固定高度缩放，宽度由原图比例得出，避免底板被拉伸。
+    let logo_size = logo * (26.0 / logo.y.max(1.0));
+    let margin = Vec2::new(9.0, 7.0);
+    let (rect, _) = ui.allocate_exact_size(logo_size + margin * 2.0, Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(8), Color32::WHITE);
+    painter.image(
+        texture.id(),
+        Rect::from_min_size(rect.min + margin, logo_size),
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
 
-        ui.add_space(8.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(
-                RichText::new("MotionSizer")
-                    .size(18.0)
-                    .strong()
-                    .color(Color32::WHITE),
-            );
-            ui.label(RichText::new("STUDIO").size(9.0).color(t::SIDE_MUTED));
-        });
-    });
+/// 内嵌的 Akribis logo；首次绘制时解码成 egui 纹理，之后复用缓存。
+fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let cache_id = egui::Id::unique("akribis_logo_texture");
+    if let Some(handle) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(cache_id)) {
+        return handle;
+    }
+    // PNG 已经裁好并去掉背景，解码失败说明打包资源损坏，直接让程序暴露问题。
+    let decoded = image::load_from_memory(include_bytes!("../../assets/akribis-logo.png"))
+        .expect("内置 Akribis logo 无法解码")
+        .to_rgba8();
+    let size = [decoded.width() as usize, decoded.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+    let handle = ctx.load_texture("akribis_logo", color_image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.insert_temp(cache_id, handle.clone()));
+    handle
 }
 
 fn side_nav(state: &mut AppState, ui: &mut egui::Ui) {
