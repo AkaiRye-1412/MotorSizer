@@ -144,7 +144,7 @@ fn capacity(available: f64, needed: f64) -> f64 {
     }
 }
 
-/// 返回满足安全系数与余量窗口的电机，按余量从大到小排序。
+/// 返回满足安全系数与余量窗口的电机，按余量从小到大（即利用率从高到低）排序。
 pub fn recommend<'a>(
     motors: &'a [Motor],
     requirement: &Requirement,
@@ -204,9 +204,12 @@ pub fn recommend<'a>(
         });
     }
 
+    // 余量越小越贴近需求，排在越前面；利用率与余量互补
+    // （利用率 = 1/(1+余量)），所以余量升序同时也是利用率降序。
+    // 余量相同时按型号名排序，保证列表顺序稳定可复现。
     out.sort_by(|a, b| {
-        b.margin_pct
-            .partial_cmp(&a.margin_pct)
+        a.margin_pct
+            .partial_cmp(&b.margin_pct)
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.motor.name.cmp(&b.motor.name))
     });
@@ -325,14 +328,16 @@ mod tests {
             },
         );
         assert_eq!(recs.len(), 2, "{:?}", recs.iter().map(|r| (&r.motor.name, r.margin_pct)).collect::<Vec<_>>());
-        assert!((recs[0].margin_pct - 100.0).abs() < 1e-6);
-        assert!((recs[1].margin_pct - 30.0).abs() < 1e-6);
+        // 余量升序：先出现 30% 的贴近型号，再是 100% 的富余型号。
+        assert!((recs[0].margin_pct - 30.0).abs() < 1e-6);
+        assert!((recs[1].margin_pct - 100.0).abs() < 1e-6);
     }
 
     #[test]
-    fn results_are_sorted_by_margin_desc() {
+    fn results_are_sorted_by_margin_ascending() {
+        // 持续能力都够用，峰值能力决定余量：small 更贴近需求，应排在前面。
         let ms = vec![
-            motor("small", 8.0, 20.0, MotorKind::Ironless, Construction::Standard),
+            motor("small", 8.0, 16.0, MotorKind::Ironless, Construction::Standard),
             motor("large", 12.0, 20.0, MotorKind::Ironless, Construction::Standard),
         ];
         let recs = recommend(
@@ -342,8 +347,10 @@ mod tests {
             &MarginWindow::default(),
         );
         assert_eq!(recs.len(), 2);
-        assert_eq!(recs[0].motor.name, "large");
-        assert_eq!(recs[1].motor.name, "small");
+        assert_eq!(recs[0].motor.name, "small");
+        assert_eq!(recs[1].motor.name, "large");
+        // 余量升序 ⇔ 利用率降序
+        assert!(recs[0].utilization > recs[1].utilization);
     }
 
     #[test]

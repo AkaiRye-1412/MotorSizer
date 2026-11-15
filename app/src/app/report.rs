@@ -243,7 +243,7 @@ fn render(state: &AppState) -> String {
 
     // ---- 3. 推荐型号 ----
     let count = state.computed.recs.len();
-    line!("## 3. 推荐型号（共 {count} 个，按余量排序）");
+    line!("## 3. 推荐型号（共 {count} 个，按余量从小到大排序）");
     line!("");
     if count == 0 {
         line!("当前安全系数或余量窗口下没有匹配型号。");
