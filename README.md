@@ -50,11 +50,14 @@ target\debug\motor-selection.exe --screenshot shots\name.png [--tab rotary]
 :: 无界面导出选型报告（打印生成的文件路径）
 target\debug\motor-selection.exe --report data\reports [--tab rotary]
 
-:: 导入自检：选中文件，可选立即识别与提交
-target\debug\motor-selection.exe --import <pdf或图片> --import-run [--import-commit]
+:: 导入自检：选中文件并立即识别（识别结果不再直接入库）
+target\debug\motor-selection.exe --import <pdf或图片> --import-run
 ```
 
 导入自检可配合环境变量 `MOTORSIZER_DB=<临时数据库路径>`，避免污染正式数据库。
+
+> 导入流程：PDF/图片识别结果只导出为 Excel 草稿，人工校对后再通过「导入电机参数」选择 `.xlsx`
+> 入库；模板与校验规则见 [docs/IMPORT-EXCEL.md](docs/IMPORT-EXCEL.md)。
 
 ## 数据与计算约定
 

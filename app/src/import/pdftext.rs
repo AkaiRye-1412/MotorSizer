@@ -708,6 +708,9 @@ fn interpret(tokens: &[Token], fonts: &HashMap<String, Font>, runs: &mut Vec<Tex
     let mut ctm = Matrix::default();
     let mut stack: Vec<Matrix> = Vec::new();
     let mut text = Matrix::default();
+    // PDF 规范中 Td/TD/T* 位移的是“行矩阵”，显示文字只推进临时文本矩阵。
+    // 两者混用会让连续绘制的文字坐标逐段漂移（表头、整页型号名会叠在一起）。
+    let mut line = Matrix::default();
     let mut font: Option<&Font> = None;
     let mut font_size = 1.0f64;
     let mut leading = 0.0f64;
@@ -745,11 +748,16 @@ fn interpret(tokens: &[Token], fonts: &HashMap<String, Font>, runs: &mut Vec<Tex
                 });
             }
         }
-        // 这份样册由排版软件导出：每个数值用一次 Tj 画出，紧接着用 Td
-        // 把笔位挪到下一行/下一列，Td 的横向分量已按“整数串不累加字宽”
-        // 计算。若这里再按字宽推进笔位，位置会逐行漂移（实测整列偏移
-        // 可达上千像素）。因此以 Td 为准，不做字宽推进。
-        let _ = (char_spacing, word_spacing, font_size);
+        // 按 PDF 规范推进文本矩阵：字宽 + 字间距 + 词间距。
+        let mut advance = 0.0;
+        for (code, _, width) in &glyphs {
+            advance += width * font_size;
+            if *code == 32 {
+                advance += word_spacing;
+            }
+            advance += char_spacing;
+        }
+        *text = text.translate(advance, 0.0);
     };
 
     for token in tokens {
@@ -772,6 +780,7 @@ fn interpret(tokens: &[Token], fonts: &HashMap<String, Font>, runs: &mut Vec<Tex
                     }
                     "BT" => {
                         text = Matrix::default();
+                        line = Matrix::default();
                     }
                     "Tf" => {
                         if let Some(Token::Name(name)) = operands.first() {
@@ -783,13 +792,15 @@ fn interpret(tokens: &[Token], fonts: &HashMap<String, Font>, runs: &mut Vec<Tex
                     }
                     "Td" => {
                         if let Some(values) = numbers(&operands, 2) {
-                            text = text.translate(values[0], values[1]);
+                            line = line.translate(values[0], values[1]);
+                            text = line;
                         }
                     }
                     "TD" => {
                         if let Some(values) = numbers(&operands, 2) {
                             leading = -values[1];
-                            text = text.translate(values[0], values[1]);
+                            line = line.translate(values[0], values[1]);
+                            text = line;
                         }
                     }
                     "TL" => {
@@ -809,17 +820,20 @@ fn interpret(tokens: &[Token], fonts: &HashMap<String, Font>, runs: &mut Vec<Tex
                     }
                     "Tm" => {
                         if let Some(values) = numbers(&operands, 6) {
-                            text = Matrix([
+                            line = Matrix([
                                 values[0], values[1], values[2], values[3], values[4], values[5],
                             ]);
+                            text = line;
                         }
                     }
                     "T*" => {
-                        text = text.translate(0.0, -leading);
+                        line = line.translate(0.0, -leading);
+                        text = line;
                     }
                     "Tj" | "'" | "\"" => {
                         if operator != "Tj" {
-                            text = text.translate(0.0, -leading);
+                            line = line.translate(0.0, -leading);
+                            text = line;
                         }
                         if let Some(Token::Str(bytes)) = operands.last() {
                             show(

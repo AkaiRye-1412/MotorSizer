@@ -191,6 +191,10 @@ fn run_script(
     let mut command = Command::new("powershell.exe");
     command
         .arg("-NoProfile")
+        // Windows 客户端默认 ExecutionPolicy 为 Restricted，直接运行 .ps1 会被拒绝；
+        // 命令行参数对非组策略设置的机器生效，避免要求用户改系统设置或要管理员权限。
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
         .arg("-File")
         .arg(script)
         .args(args)
@@ -289,7 +293,13 @@ fn decode_stderr(bytes: &[u8]) -> String {
     if bytes.len() % 2 == 0 && zeros * 4 > bytes.len() / 2 {
         return decode_utf16(0, false);
     }
-    String::from_utf8_lossy(bytes).into_owned()
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
+    }
+    // Windows PowerShell 5.1 在中文系统上按本地代码页（GBK/936）写错误流，
+    // 按 UTF-8 强行解码会把整句中文变成乱码，这里回退到 GBK。
+    let (text, _, _) = encoding_rs::GBK.decode(bytes);
+    text.into_owned()
 }
 
 /// 读取识别脚本写出的 `*.error` sidecar（UTF-8 JSON），把阶段与原因
@@ -544,6 +554,12 @@ mod tests {
     fn absolute_document_paths_keep_their_form() {
         let resolved = resolve_document_path(Path::new(r"C:\docs/page.png"), Path::new(r"C:\work"));
         assert_eq!(resolved, PathBuf::from(r"C:\docs\page.png"));
+    }
+
+    #[test]
+    fn decodes_gbk_stderr_instead_of_mojibake() {
+        // 中文系统上 PowerShell 5.1 的错误流是 GBK（936）编码。
+        assert_eq!(decode_stderr(&[0xBD, 0xFB, 0xD6, 0xB9]), "禁止");
     }
 
     #[test]

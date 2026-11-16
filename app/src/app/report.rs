@@ -463,7 +463,7 @@ mod tests {
     use super::*;
 
     fn state() -> AppState {
-        AppState::from_catalog(crate::data::repo::load_in_memory().expect("内存数据库"))
+        AppState::from_catalog(crate::data::fixtures::sample_catalog())
     }
 
     #[test]

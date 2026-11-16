@@ -10,10 +10,12 @@ use egui::{
 
 use crate::app::state::{AppState, ImportPhase};
 use crate::data::motor::{classify, MotorKind};
+use crate::import::excel;
 use crate::import::parse::{self, Field};
 use crate::import::workflow;
 
 use super::components as c;
+use super::file_dialog;
 use super::theme as t;
 
 enum Action {
@@ -21,7 +23,14 @@ enum Action {
     Start,
     Cancel,
     Close,
-    Import,
+    /// 把识别预览中勾选的行导出为 Excel 草稿。
+    ExportExcel,
+    /// 把校验通过的 Excel 行写入数据库。
+    CommitExcel,
+    /// 重新选择文件（Excel 校验失败后修正再导入）。
+    Reselect,
+    /// 导出空白模板，人工填写后再导入。
+    ExportTemplate,
 }
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
@@ -58,6 +67,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 ImportPhase::Preview(preview) => {
                     preview_page(ui, preview, &mut state.import.selected)
                 }
+                ImportPhase::ExcelPreview(preview) => excel_preview_page(ui, preview),
                 ImportPhase::Failed(error) => failed_page(ui, error),
             }
         });
@@ -67,9 +77,29 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
         Action::Start => state.begin_import(ctx),
         Action::Cancel => state.cancel_import(),
         Action::Close => state.close_import(),
-        Action::Import => {
-            if let Err(error) = state.import_selected() {
+        Action::ExportExcel => {
+            let name = format!("电机参数-{}.xlsx", state.draft_source_name());
+            if let Some(path) = file_dialog::save_excel(&name, None) {
+                if let Err(error) = state.export_draft_to(&path) {
+                    state.status = format!("导出失败：{error}");
+                }
+            }
+        }
+        Action::CommitExcel => {
+            if let Err(error) = state.commit_excel_import() {
                 state.status = format!("导入失败：{error}");
+            }
+        }
+        Action::Reselect => {
+            if let Some(path) = file_dialog::open_document() {
+                state.select_import_document(path);
+            }
+        }
+        Action::ExportTemplate => {
+            if let Some(path) = file_dialog::save_excel("电机参数-空白模板.xlsx", None) {
+                if let Err(error) = state.export_blank_template_to(&path) {
+                    state.status = format!("导出失败：{error}");
+                }
             }
         }
         Action::None => {}
@@ -280,6 +310,9 @@ fn failed_page(ui: &mut egui::Ui, error: &str) -> Action {
         if secondary(ui, "关闭") {
             action = Action::Close;
         }
+        if secondary(ui, "导出空白模板") {
+            action = Action::ExportTemplate;
+        }
     });
     action
 }
@@ -314,6 +347,9 @@ fn preview_page(ui: &mut egui::Ui, preview: &mut workflow::Preview, selected: &m
         ui.horizontal(|ui| {
             if secondary(ui, "关闭") {
                 action = Action::Close;
+            }
+            if secondary(ui, "导出空白模板") {
+                action = Action::ExportTemplate;
             }
         });
         return action;
@@ -444,6 +480,13 @@ fn preview_page(ui: &mut egui::Ui, preview: &mut workflow::Preview, selected: &m
 
     *selected = current;
     ui.add_space(12.0);
+    c::note_line(
+        ui,
+        "识别结果只导出为 Excel：请在 Excel 中核对、补全后，通过「导入电机参数」重新选择 .xlsx 入库。",
+        t::WARNING,
+        t::WARNING_SOFT,
+    );
+    ui.add_space(10.0);
     c::hairline(ui, t::BORDER);
     ui.add_space(10.0);
     ui.horizontal(|ui| {
@@ -451,12 +494,138 @@ fn preview_page(ui: &mut egui::Ui, preview: &mut workflow::Preview, selected: &m
             action = Action::Close;
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if primary(ui, &format!("导出 Excel（{included} 个型号）"), included > 0) {
+                action = Action::ExportExcel;
+            }
+        });
+    });
+    action
+}
+
+/// Excel 导入预览：逐行展示校验结果，存在任何错误时整份不允许提交。
+fn excel_preview_page(ui: &mut egui::Ui, preview: &excel::ExcelPreview) -> Action {
+    let mut action = Action::None;
+    let overwrites = preview.overwrite_count();
+    let valid = preview.valid_motors().len();
+    let subtitle = format!(
+        "{} · {} 行数据 · 新增 {} / 覆盖 {} / 错误 {}",
+        preview
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| preview.path.display().to_string()),
+        preview.rows.len(),
+        valid.saturating_sub(overwrites),
+        overwrites,
+        preview.error_count()
+    );
+    if header(ui, "Excel 导入预览", &subtitle) {
+        action = Action::Close;
+    }
+
+    for error in &preview.errors {
+        c::note_line(ui, error, t::ERROR, t::ERROR_SOFT);
+        ui.add_space(4.0);
+    }
+
+    if preview.rows.is_empty() {
+        c::empty_state(
+            ui,
+            "没有可导入的数据",
+            "请确认表头包含「型号 / 类型 / 持续值 / 峰值」，且至少有一行数据。",
+        );
+    } else {
+        ScrollArea::vertical()
+            .id_salt("excel_import_rows")
+            .max_height(430.0)
+            .show(ui, |ui| {
+                egui::Grid::new("excel_import_grid")
+                    .num_columns(5)
+                    .striped(true)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        for title in ["行", "型号", "类型", "持续 / 峰值", "状态"] {
+                            ui.label(RichText::new(title).size(10.5).color(t::MUTED));
+                        }
+                        ui.end_row();
+
+                        for row in &preview.rows {
+                            ui.label(RichText::new(row.line.to_string()).size(10.5).color(t::MUTED));
+                            ui.label(RichText::new(&row.name).size(11.5).color(t::TEXT));
+                            let kind_text = row
+                                .motor
+                                .as_ref()
+                                .map(|motor| {
+                                    if motor.kind == MotorKind::Rotary {
+                                        "旋转"
+                                    } else {
+                                        "直线"
+                                    }
+                                })
+                                .unwrap_or("—");
+                            ui.label(RichText::new(kind_text).size(11.0).color(t::TEXT_2));
+                            let values = row
+                                .motor
+                                .as_ref()
+                                .map(|motor| format!("{:.3} / {:.3}", motor.cont, motor.peak))
+                                .unwrap_or_else(|| "—".to_owned());
+                            ui.label(RichText::new(values).size(11.0).color(t::TEXT_2));
+                            ui.horizontal(|ui| {
+                                if !row.errors.is_empty() {
+                                    c::badge(ui, "错误", t::ERROR, t::ERROR_SOFT);
+                                } else if row.motor.as_ref().is_some_and(|motor| {
+                                    parse::match_existing(&motor.name, &preview.existing).is_some()
+                                }) {
+                                    c::badge(ui, "覆盖", t::WARNING, t::WARNING_SOFT);
+                                } else {
+                                    c::badge(ui, "新增", t::SUCCESS, t::ACCENT_SOFT);
+                                }
+                            });
+                            ui.end_row();
+
+                            if !row.errors.is_empty() {
+                                ui.label("");
+                                ui.label(
+                                    RichText::new(row.errors.join("；"))
+                                        .size(10.5)
+                                        .color(t::ERROR),
+                                );
+                                ui.label("");
+                                ui.label("");
+                                ui.label("");
+                                ui.end_row();
+                            }
+                        }
+                    });
+            });
+    }
+
+    ui.add_space(12.0);
+    if preview.blocked() {
+        c::note_line(
+            ui,
+            "存在校验错误，整份 Excel 不能提交；请在 Excel 中修正后重新选择文件。",
+            t::ERROR,
+            t::ERROR_SOFT,
+        );
+        ui.add_space(6.0);
+    }
+    c::hairline(ui, t::BORDER);
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        if secondary(ui, "关闭") {
+            action = Action::Close;
+        }
+        if secondary(ui, "重新选择文件") {
+            action = Action::Reselect;
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if primary(
                 ui,
-                &format!("导入 {included} 个型号"),
-                included > 0,
+                &format!("导入 {valid} 个型号"),
+                !preview.blocked() && valid > 0,
             ) {
-                action = Action::Import;
+                action = Action::CommitExcel;
             }
         });
     });

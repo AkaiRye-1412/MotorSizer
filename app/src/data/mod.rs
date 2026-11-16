@@ -2,3 +2,6 @@
 
 pub mod motor;
 pub mod repo;
+
+#[cfg(test)]
+pub mod fixtures;

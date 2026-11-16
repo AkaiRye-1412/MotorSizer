@@ -7,7 +7,7 @@ use eframe::egui::Context;
 
 use crate::data::motor::{Construction, Motor, MotorKind};
 use crate::data::repo::{self, Catalog};
-use crate::import::{ocr, workflow};
+use crate::import::{excel, ocr, workflow};
 use crate::domain::curve::{self, Combined, CurveSegment};
 use crate::domain::drive::{self, Drive, DriveMatch, DriveSettings};
 use crate::domain::motion::{self, MotionInput, Shape};
@@ -198,6 +198,8 @@ pub enum ImportPhase {
     },
     Running(ImportRun),
     Preview(workflow::Preview),
+    /// 已读入并校验的 Excel，等待用户确认后入库。
+    ExcelPreview(excel::ExcelPreview),
     Failed(String),
 }
 
@@ -324,13 +326,6 @@ impl AppState {
         self.recompute();
     }
 
-    /// 导入落库后重新载入数据库并刷新推荐列表。
-    pub fn reload_from_db(&mut self) -> Result<(), String> {
-        let catalog = repo::load_default()?;
-        self.apply_catalog(catalog);
-        Ok(())
-    }
-
     /// 当前内存中的全部型号（供导入时判断同名覆盖）。
     pub fn all_motors(&self) -> Vec<Motor> {
         self.linear_motors
@@ -341,18 +336,117 @@ impl AppState {
     }
 
     /// 用户通过“打开文件”对话框选中了文档。
+    ///
+    /// `.xlsx` 直接读入并校验，其余按 PDF/图片走识别流程。
     pub fn select_import_document(&mut self, path: PathBuf) {
-        let is_pdf = path
+        let extension = path
             .extension()
-            .map(|extension| extension.to_string_lossy().eq_ignore_ascii_case("pdf"))
-            .unwrap_or(false);
+            .map(|extension| extension.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
         self.import.selected = 0;
+
+        if extension == "xlsx" {
+            match excel::read_workbook(&path, &self.all_motors()) {
+                Ok(preview) => {
+                    self.status = format!(
+                        "Excel 已读取：{} 行（错误 {} 处）",
+                        preview.rows.len(),
+                        preview.error_count()
+                    );
+                    self.import.phase = ImportPhase::ExcelPreview(preview);
+                }
+                Err(error) => self.import.phase = ImportPhase::Failed(error),
+            }
+            return;
+        }
+
+        let is_pdf = extension == "pdf";
         self.import.phase = ImportPhase::Ready {
             path,
             start_page: 1,
             end_page: 0,
             is_pdf,
         };
+    }
+
+    /// 识别预览中勾选的行转换为 Excel 草稿行。
+    pub fn draft_rows(&self) -> Option<Vec<excel::DraftRow>> {
+        let ImportPhase::Preview(preview) = &self.import.phase else {
+            return None;
+        };
+        Some(
+            preview
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.include)
+                .map(|candidate| excel::DraftRow {
+                    page: candidate.page,
+                    motor: candidate.motor.clone(),
+                })
+                .collect(),
+        )
+    }
+
+    /// 识别预览的来源文件名，用于生成草稿文件名。
+    pub fn draft_source_name(&self) -> String {
+        let ImportPhase::Preview(preview) = &self.import.phase else {
+            return "电机参数".to_owned();
+        };
+        preview
+            .source
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "电机参数".to_owned())
+    }
+
+    /// 导出空白模板：识别失败或结果不可用时，仍能人工填写后走导入流程。
+    pub fn export_blank_template_to(&mut self, path: &std::path::Path) -> Result<(), String> {
+        excel::write_template(path)?;
+        self.status = format!("已导出空白模板到 {}", path.display());
+        Ok(())
+    }
+
+    /// 把勾选的识别结果写成 Excel 草稿。
+    pub fn export_draft_to(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        let rows = self
+            .draft_rows()
+            .ok_or_else(|| "当前没有可导出的识别结果".to_owned())?;
+        if rows.is_empty() {
+            return Err("请至少勾选一个型号".to_owned());
+        }
+        excel::write_draft(path, &rows)?;
+        self.status = format!("已导出 {} 个型号到 {}", rows.len(), path.display());
+        Ok(rows.len())
+    }
+
+    /// 把校验通过的 Excel 行写入 SQLite。
+    pub fn commit_excel_import(&mut self) -> Result<(usize, usize), String> {
+        let path = repo::default_db_path();
+        self.commit_excel_import_at(&path)
+    }
+
+    /// 可指定数据库路径的提交实现，便于测试不触碰正式库。
+    fn commit_excel_import_at(&mut self, db_path: &std::path::Path) -> Result<(usize, usize), String> {
+        let (motors, overwrites) = {
+            let ImportPhase::ExcelPreview(preview) = &self.import.phase else {
+                return Err("当前没有可导入的 Excel 数据".to_owned());
+            };
+            if preview.blocked() {
+                return Err("Excel 中仍有校验错误，请修正后重新选择文件".to_owned());
+            }
+            let motors = preview.valid_motors();
+            if motors.is_empty() {
+                return Err("没有可导入的数据行".to_owned());
+            }
+            (motors, preview.overwrite_count())
+        };
+        let count = motors.len();
+        repo::upsert_motors(db_path, &motors)?;
+        let catalog = repo::load_at(db_path)?;
+        self.apply_catalog(catalog);
+        self.close_import();
+        self.status = format!("已从 Excel 导入 {count} 个型号（覆盖 {overwrites} 个同名记录）");
+        Ok((count, overwrites))
     }
 
     /// 从“准备”阶段启动后台识别。
@@ -438,36 +532,6 @@ impl AppState {
     pub fn close_import(&mut self) {
         self.import.phase = ImportPhase::Closed;
         self.import.selected = 0;
-    }
-
-    /// 把预览中勾选的行写入 SQLite，并刷新内存资料。
-    /// 返回（导入数量，覆盖数量）。
-    pub fn import_selected(&mut self) -> Result<(usize, usize), String> {
-        let (selected, overwrites) = {
-            let ImportPhase::Preview(preview) = &self.import.phase else {
-                return Err("当前没有可导入的预览数据".to_owned());
-            };
-            let selected: Vec<Motor> = preview
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.include)
-                .map(|candidate| candidate.motor.clone())
-                .collect();
-            if selected.is_empty() {
-                return Err("请至少勾选一个型号".to_owned());
-            }
-            let overwrites = preview.overwrite_count();
-            (selected, overwrites)
-        };
-        repo::upsert_motors(&repo::default_db_path(), &selected)?;
-        self.reload_from_db()?;
-        self.close_import();
-        self.status = format!(
-            "已导入 {} 个型号（覆盖 {} 个同名记录）",
-            selected.len(),
-            overwrites
-        );
-        Ok((selected.len(), overwrites))
     }
 
     pub fn touch(&mut self) {
@@ -845,9 +909,9 @@ pub fn construction_label(construction: Construction) -> &'static str {
 mod tests {
     use super::*;
 
-    /// 测试统一使用内存数据库，避免触碰真实的 data/motors.db。
+    /// 测试统一使用示例资料，避免依赖内置 data/motors.json 的具体内容。
     fn state() -> AppState {
-        AppState::from_catalog(crate::data::repo::load_in_memory().expect("内存数据库"))
+        AppState::from_catalog(crate::data::fixtures::sample_catalog())
     }
 
     #[test]
@@ -1020,5 +1084,68 @@ mod tests {
         state.touch();
         state.recompute();
         assert!(state.computed.errors.is_empty(), "{:?}", state.computed.errors);
+    }
+
+    /// 端到端：写出 Excel 草稿 → 读回 → 提交进临时数据库。
+    #[test]
+    fn excel_draft_round_trip_commits_to_database() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("系统时间")
+            .as_nanos();
+        let dir = std::env::temp_dir();
+        let xlsx = dir.join(format!("motionsizer-excel-commit-{nanos}.xlsx"));
+        let db = dir.join(format!("motionsizer-excel-commit-{nanos}.db"));
+
+        let motor = Motor {
+            name: "EXCEL-TEST-01".to_owned(),
+            cont: 12.0,
+            peak: 30.0,
+            km: 3.0,
+            kf: 4.0,
+            ke: 4.0,
+            i_cont: 2.0,
+            i_peak: 6.0,
+            induct: 3.0,
+            resist: 5.0,
+            rated_w: 100.0,
+            max_w: 300.0,
+            mover_mass: 0.4,
+            length: 100.0,
+            inertia: 0.0,
+            max_speed: 3.0,
+            kind: MotorKind::Ironless,
+            construction: Construction::Standard,
+        };
+        excel::write_draft(
+            &xlsx,
+            &[excel::DraftRow {
+                page: 1,
+                motor,
+            }],
+        )
+        .expect("写出草稿");
+
+        // 正式运行时数据库在启动阶段已建好；测试里先初始化空库。
+        crate::data::repo::load_at(&db).expect("初始化测试库");
+
+        let mut state = state();
+        let preview = excel::read_workbook(&xlsx, &state.all_motors()).expect("读回草稿");
+        assert!(!preview.blocked(), "{:?}", preview.errors);
+        state.import.phase = ImportPhase::ExcelPreview(preview);
+
+        let (count, overwrites) = state.commit_excel_import_at(&db).expect("提交");
+        assert_eq!(count, 1);
+        assert_eq!(overwrites, 0);
+
+        let catalog = crate::data::repo::load_at(&db).expect("读回数据库");
+        assert!(catalog
+            .motors
+            .iter()
+            .any(|stored| stored.name == "EXCEL-TEST-01"));
+        assert!(matches!(state.import.phase, ImportPhase::Closed));
+
+        let _ = std::fs::remove_file(&xlsx);
+        let _ = std::fs::remove_file(&db);
     }
 }

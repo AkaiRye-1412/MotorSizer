@@ -622,32 +622,35 @@ mod tests {
         std::env::temp_dir().join(format!("motorsizer-{tag}-{nanos}.db"))
     }
 
+    /// 种子文件里的记录数；产品默认不预置电机，这里保证测试与资料文件同步。
+    fn embedded_motor_count() -> usize {
+        serde_json::from_str::<Vec<Value>>(MOTORS_JSON)
+            .map(|items| items.len())
+            .unwrap_or(0)
+    }
+
     #[test]
-    fn in_memory_seed_has_expected_counts() {
+    fn in_memory_seed_matches_embedded_manifest() {
         let catalog = load_in_memory().expect("内存建库");
-        assert_eq!(catalog.motors.len(), 302, "电机总数");
-        let linear = catalog
-            .motors
-            .iter()
-            .filter(|m| m.kind != MotorKind::Rotary)
-            .count();
-        let rotary = catalog
-            .motors
-            .iter()
-            .filter(|m| m.kind == MotorKind::Rotary)
-            .count();
-        assert_eq!(linear, 232, "直线电机数量");
-        assert_eq!(rotary, 70, "旋转电机数量");
+        assert_eq!(
+            catalog.motors.len(),
+            embedded_motor_count(),
+            "电机总数应与内嵌资料一致"
+        );
         // 内置驱动器清单已按用户要求移除；驱动器表保留但为空。
         assert!(catalog.drives.is_empty(), "不再导入内置驱动器");
+    }
 
-        // ACD120-80-Y 的 Motor Type 写成了 MoMotor Type，应识别为旋转电机。
-        let acd = catalog
-            .motors
-            .iter()
-            .find(|m| m.name == "ACD120-80-Y")
-            .expect("ACD120-80-Y");
-        assert_eq!(acd.kind, MotorKind::Rotary);
+    #[test]
+    fn momotor_type_typo_is_treated_as_rotary() {
+        // 资料里个别记录把 Motor Type 写成了 MoMotor Type（如 ACD120-80-Y）。
+        let value: Value = serde_json::from_str(
+            r#"{"name":"ACD120-80-Y","MoMotor Type":"R","Continuous Torque":1.0,"Peak Torque":3.0}"#,
+        )
+        .expect("测试资料");
+        let row = motor_row(&value).expect("解析资料");
+        assert_eq!(row.motor_type, "R");
+        assert_eq!(row.kind, MotorKind::Rotary.as_str());
     }
 
     #[test]
@@ -655,7 +658,7 @@ mod tests {
         let path = temp_db("reuse");
         let first = load_at(&path).expect("首次建库");
         assert!(first.seeded);
-        assert_eq!(first.motors.len(), 302);
+        assert_eq!(first.motors.len(), embedded_motor_count());
 
         let second = load_at(&path).expect("再次载入");
         assert!(!second.seeded);
@@ -752,20 +755,20 @@ mod tests {
 
     #[test]
     fn water_cooled_acm_keeps_iron_core_classification() {
-        let catalog = load_in_memory().expect("内存建库");
-        let motor = catalog
-            .motors
-            .iter()
-            .find(|m| m.name == "ACM2-D-W-S1")
-            .expect("ACM2-D-W-S1");
-        assert_eq!(motor.kind, MotorKind::IronCore);
-        assert_eq!(motor.construction, Construction::WaterCooled);
+        let value: Value = serde_json::from_str(
+            r#"{"name":"ACM2-D-W-S1","Motor Type":"L","Continuous Force":10.0,"Peak Force":30.0}"#,
+        )
+        .expect("测试资料");
+        let row = motor_row(&value).expect("解析资料");
+        assert_eq!(row.kind, MotorKind::IronCore.as_str());
+        assert_eq!(row.construction, Construction::WaterCooled.as_str());
     }
 
     #[test]
     fn upsert_inserts_then_overwrites_without_touching_private_columns() {
         let path = temp_db("upsert");
         load_at(&path).expect("首次建库");
+        let baseline = embedded_motor_count();
 
         let mut motor = Motor {
             name: "IMPORT-TEST-S1".to_owned(),
@@ -789,7 +792,7 @@ mod tests {
         };
         assert_eq!(upsert_motors(&path, &[motor.clone()]).expect("插入"), 1);
         let catalog = load_at(&path).expect("插入后载入");
-        assert_eq!(catalog.motors.len(), 303, "应新增一条记录");
+        assert_eq!(catalog.motors.len(), baseline + 1, "应新增一条记录");
 
         // 模拟资料库更细的列：导入覆盖时必须保留。
         {
@@ -804,7 +807,7 @@ mod tests {
         motor.cont = 4.5;
         upsert_motors(&path, &[motor]).expect("覆盖");
         let catalog = load_at(&path).expect("覆盖后载入");
-        assert_eq!(catalog.motors.len(), 303, "同名不应新增");
+        assert_eq!(catalog.motors.len(), baseline + 1, "同名不应新增");
         let stored = catalog
             .motors
             .iter()

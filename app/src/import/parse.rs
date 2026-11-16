@@ -104,10 +104,31 @@ const ALIASES: &[(&str, Field)] = &[
 
 pub fn field_of_label(text: &str) -> Option<Field> {
     let joined: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    ALIASES
+    if let Some(field) = ALIASES
         .iter()
         .find(|(alias, _)| joined.contains(alias))
         .map(|(_, field)| *field)
+    {
+        return Some(field);
+    }
+
+    // OCR 常把单个汉字认错（“电机常数”识成“电枧常数”），精确匹配会整行丢失。
+    // 只比对标签开头并对长度 ≥4 的别名允许 1 个字符不同；不能用滑动窗口，
+    // 否则“最高线圈温度”中间的“线圈温度”会被误判成“线圈长度”。
+    let text_chars: Vec<char> = joined.chars().collect();
+    ALIASES.iter().find_map(|(alias, field)| {
+        let alias_chars: Vec<char> = alias.chars().collect();
+        if alias_chars.len() < 4 || text_chars.len() < alias_chars.len() {
+            return None;
+        }
+        let prefix = &text_chars[..alias_chars.len()];
+        let diff = prefix
+            .iter()
+            .zip(&alias_chars)
+            .filter(|(a, b)| a != b)
+            .count();
+        (diff <= 1).then_some(*field)
+    })
 }
 
 /// 识别串联/并联子表头。子表头是短标签（“串联”“并联”“串联接法”），
@@ -333,6 +354,299 @@ impl Recognized {
 
 /// 识别页面中的参数表。失败时返回 `None`，由调用方汇总为可读错误。
 pub fn detect_table(sheet: &OcrSheet) -> Option<PageTable> {
+    detect_table_anchored(sheet).or_else(|| detect_table_legacy(sheet))
+}
+
+/// 锚点式表格重建：以“字段标签行”和“数值列”为锚点，不依赖表头外观猜测。
+///
+/// 1. 左侧字段标签按 x 聚类成标签列，行锚点即标签行；
+/// 2. 取数值最多的一行作为参考行，把该行数字按 x 聚类得到列锚点；
+/// 3. 列标题取列锚点上方最近的型号文本，支持两级表头（型号 + 后缀）与串联/并联子表头；
+/// 4. 表格上下边界由行锚点决定，图注、尺寸图里的文字不会混入。
+fn detect_table_anchored(sheet: &OcrSheet) -> Option<PageTable> {
+    if sheet.width <= 0.0 || sheet.height <= 0.0 {
+        return None;
+    }
+    let width = sheet.width;
+    let height = sheet.height;
+    let mut rotary_hint = false;
+
+    // 1. 收集字段标签行。
+    let mut labels: Vec<(Field, f64, f64, f64)> = Vec::new();
+    for line in &sheet.lines {
+        if line.words.is_empty() {
+            continue;
+        }
+        let text = line.joined();
+        let Some(field) = field_of_label(&text) else {
+            continue;
+        };
+        let y = line.center_y();
+        if y < height * 0.08 {
+            continue;
+        }
+        if text.contains("转矩") {
+            rotary_hint = true;
+        }
+        labels.push((field, y, line.min_x(), line.center_x()));
+    }
+    if labels.len() < 3 {
+        return None;
+    }
+    if labels.iter().any(|(field, ..)| matches!(field, Field::Inertia | Field::MaxSpeed)) {
+        rotary_hint = true;
+    }
+
+    // 标签列聚类：同一起始 x 的一组标签才属于同一张表。
+    labels.sort_by(|a, b| a.2.total_cmp(&b.2));
+    // 标签列按 x 聚类。样册同一段标签可能因排版被拉到不同起点
+    // （第 44 页“持续推力(自冷)”与其余标签相差约 95px），间距放宽到 5% 页宽，
+    // 但仍远小于左右并排两张表的距离。
+    let cluster_gap = (width * 0.05).max(60.0);
+    let mut groups: Vec<Vec<(Field, f64, f64, f64)>> = Vec::new();
+    for label in labels {
+        match groups.last_mut() {
+            Some(group) if (label.2 - group.last().map(|item| item.2).unwrap_or(0.0)).abs() <= cluster_gap => {
+                group.push(label);
+            }
+            _ => groups.push(vec![label]),
+        }
+    }
+    let group = groups
+        .into_iter()
+        .max_by_key(|group| {
+            let mut fields: Vec<Field> = group.iter().map(|item| item.0).collect();
+            fields.sort_by_key(|field| *field as u8);
+            fields.dedup();
+            (fields.len(), group.len())
+        })?;
+
+    // 行锚点：同名字段（如“线圈质量”和“磁轨质量”）保留最靠上的一条，
+    // 不能按 x 顺序取，否则会把磁轨质量当成电机质量。
+    let mut ordered = group.clone();
+    ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut rows: Vec<TableRow> = Vec::new();
+    for (field, y, _, _) in ordered.into_iter() {
+        if rows.iter().all(|row| row.field != field) {
+            rows.push(TableRow { field, center_y: y });
+        }
+    }
+    if rows.len() < 3 {
+        return None;
+    }
+    rows.sort_by(|a, b| a.center_y.total_cmp(&b.center_y));
+    let label_right = group.iter().map(|item| item.3).fold(f64::NEG_INFINITY, f64::max);
+    let label_left = group.iter().map(|item| item.2).fold(f64::INFINITY, f64::min);
+
+    let row_gap = rows
+        .windows(2)
+        .map(|pair| pair[1].center_y - pair[0].center_y)
+        .filter(|gap| *gap > 1.0)
+        .fold(f64::INFINITY, f64::min);
+    let row_tolerance = (row_gap * 0.55).clamp(10.0, 24.0);
+
+    // 2. 选择数值最多的一行作为参考行，按 x 聚类得到列锚点。
+    let mut numeric: Vec<(f64, f64)> = Vec::new();
+    for line in &sheet.lines {
+        if line.words.is_empty() {
+            continue;
+        }
+        if parse_number(&line.joined()).is_none() {
+            continue;
+        }
+        let x = line.center_x();
+        if x < label_right + width * 0.02 || x < label_left + width * 0.1 {
+            continue;
+        }
+        numeric.push((line.center_y(), x));
+    }
+
+    let mut best_row: Option<(usize, Vec<f64>)> = None;
+    for (row_index, row) in rows.iter().enumerate() {
+        let xs: Vec<f64> = numeric
+            .iter()
+            .filter(|(y, _)| (y - row.center_y).abs() <= row_tolerance * 1.2)
+            .map(|(_, x)| *x)
+            .collect();
+        if xs.is_empty() {
+            continue;
+        }
+        if best_row.as_ref().map(|(_, best)| xs.len() > best.len()).unwrap_or(true) {
+            best_row = Some((row_index, xs));
+        }
+    }
+    let (_, reference_xs) = best_row?;
+
+    let column_gap = (width * 0.015).max(25.0);
+    let mut column_centers = cluster_centers(&reference_xs, column_gap);
+    column_centers.sort_by(|a, b| a.total_cmp(b));
+    if column_centers.is_empty() {
+        return None;
+    }
+    // 参考行里的杂质数字（图注等）会产生远离主体列的孤立簇，按“至少两列
+    // 之间有合理间距”保留主体；只有一列时直接采用。
+    if column_centers.len() > 1 {
+        let min_gap = column_centers
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .fold(f64::INFINITY, f64::min);
+        if min_gap < column_gap * 0.4 {
+            return None;
+        }
+    }
+
+    let min_column_gap = if column_centers.len() > 1 {
+        column_centers
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .fold(f64::INFINITY, f64::min)
+    } else {
+        width * 0.1
+    };
+    let column_tolerance = (min_column_gap * 0.75).clamp(40.0, 120.0);
+
+    // 3. 列标题：列锚点上方最近的型号 + 可选后缀 + 串联/并联子表头。
+    let first_row_y = rows.first().map(|row| row.center_y).unwrap_or(height * 0.3);
+    let header_top = (first_row_y - 240.0).max(0.0);
+    let header_bottom = first_row_y - 4.0;
+
+    let mut headers: Vec<(String, f64, f64)> = Vec::new();
+    let mut suffixes: Vec<(String, f64, f64)> = Vec::new();
+    let mut connections: Vec<(&'static str, f64, f64)> = Vec::new();
+    for line in &sheet.lines {
+        if line.words.is_empty() {
+            continue;
+        }
+        let y = line.center_y();
+        if y < header_top || y > header_bottom {
+            continue;
+        }
+        let text = line.joined();
+        if let Some(connection) = connection_label(&text) {
+            connections.push((connection, y, line.center_x()));
+            continue;
+        }
+        if contains_chinese(&text) {
+            continue;
+        }
+        if let Some(suffix) = clean_suffix(&text) {
+            suffixes.push((suffix, y, line.center_x()));
+            continue;
+        }
+        let cleaned = clean_header(&text);
+        if cleaned.is_empty() {
+            continue;
+        }
+        if is_model_like(&cleaned) {
+            headers.push((cleaned, y, line.center_x()));
+        }
+    }
+
+    let mut columns: Vec<TableColumn> = Vec::new();
+    for center in &column_centers {
+        let nearest = |items: &[(String, f64, f64)]| {
+            items
+                .iter()
+                .filter(|(_, _, x)| (x - center).abs() <= column_tolerance * 1.2)
+                .min_by(|a, b| {
+                    (a.2 - center)
+                        .abs()
+                        .total_cmp(&(b.2 - center).abs())
+                        .then_with(|| b.1.total_cmp(&a.1))
+                })
+                .map(|(name, y, x)| (name.clone(), *y, *x))
+        };
+        let Some((mut name, header_y, _)) = nearest(&headers) else {
+            continue;
+        };
+        if let Some((suffix, _, _)) = suffixes
+            .iter()
+            .filter(|(_, y, x)| *y >= header_y && (x - center).abs() <= column_tolerance * 1.2)
+            .min_by(|a, b| (a.2 - center).abs().total_cmp(&(b.2 - center).abs()))
+        {
+            name.push_str(suffix);
+        }
+        if let Some((connection, _, _)) = connections
+            .iter()
+            .filter(|(_, _, x)| (x - center).abs() <= column_tolerance * 1.2)
+            .min_by(|a, b| (a.2 - center).abs().total_cmp(&(b.2 - center).abs()))
+        {
+            if let Some(composed) = compose_name(&name, connection, rotary_hint) {
+                name = composed;
+            }
+        }
+        columns.push(TableColumn {
+            name,
+            center_x: *center,
+        });
+    }
+    if columns.is_empty() {
+        return None;
+    }
+
+    let bottom = rows.iter().map(|row| row.center_y).fold(0.0, f64::max) + row_tolerance * 2.0;
+
+    Some(PageTable {
+        page: sheet.page,
+        rotary: rotary_hint,
+        columns,
+        rows,
+        header_bottom: first_row_y - row_tolerance,
+        bottom,
+        column_tolerance,
+        row_tolerance,
+        width,
+        height,
+    })
+}
+
+/// 二级表头后缀（如 `-V107`）：保留开头的连字符，只做全角折半与字符归一。
+fn clean_suffix(text: &str) -> Option<String> {
+    let normalized: String = text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .map(|ch| {
+            if ('\u{FF01}'..='\u{FF5E}').contains(&ch) {
+                char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch)
+            } else {
+                match ch {
+                    'һ' | '－' | '–' | '—' | '−' | '一' => '-',
+                    other => other,
+                }
+            }
+        })
+        .collect();
+    let body = normalized.strip_prefix('-')?;
+    if body.is_empty() || !body.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(format!("-{}", body.to_ascii_uppercase()))
+}
+
+/// 把一组 x 坐标按间距聚类，返回每簇的平均 x。
+fn cluster_centers(values: &[f64], gap: f64) -> Vec<f64> {
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let mut centers = Vec::new();
+    let mut current: Vec<f64> = Vec::new();
+    for value in sorted {
+        match current.last() {
+            Some(previous) if value - previous <= gap => current.push(value),
+            _ => {
+                if !current.is_empty() {
+                    centers.push(current.iter().sum::<f64>() / current.len() as f64);
+                }
+                current = vec![value];
+            }
+        }
+    }
+    if !current.is_empty() {
+        centers.push(current.iter().sum::<f64>() / current.len() as f64);
+    }
+    centers
+}
+
+fn detect_table_legacy(sheet: &OcrSheet) -> Option<PageTable> {
     if sheet.width <= 0.0 || sheet.height <= 0.0 {
         return None;
     }
@@ -394,6 +708,11 @@ pub fn detect_table(sheet: &OcrSheet) -> Option<PageTable> {
     subs.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let first_value_y = rows.first().map(|row| row.center_y).unwrap_or(height * 0.2);
+
+    // 尺寸图、图注里也可能出现“串联/并联”字样（第 60 页 y=2035 就是一个），
+    // 若不限制范围会把表格下边界拉到图注位置，导致所有数值被判定在表外。
+    // 子表头只可能位于首个行标签上方的表头带内。
+    subs.retain(|(_, y, _)| *y < first_value_y - 4.0 && *y > first_value_y - 180.0);
 
     // 3. 列：优先使用子表头上方的型号标题（每列一个），否则退化为
     //    “没有串联/并联标记的单列/多列”。
@@ -1129,6 +1448,61 @@ mod tests {
 
     fn cell(text: &str, x: f64, y: f64) -> OcrLine {
         line(vec![word(text, x - 20.0, y - 9.0, 40.0)])
+    }
+
+    #[test]
+    fn anchored_table_ignores_stray_connection_below_rows() {
+        let mut base = linear_two_columns();
+        let clean = detect_table_anchored(&base).expect("锚点建表");
+        // 尺寸图里的孤立“串联”不能把表格下边界拉到图注位置。
+        base.lines.push(line(vec![word("串联", 420.0, 900.0, 40.0)]));
+        let table = detect_table_anchored(&base).expect("锚点建表");
+        assert!(
+            (table.bottom - clean.bottom).abs() < 1.0,
+            "图注不应改变表格下边界: {} vs {}",
+            table.bottom,
+            clean.bottom
+        );
+        assert_eq!(table.columns.len(), 2);
+    }
+
+    #[test]
+    fn anchored_table_prefers_topmost_duplicate_field_label() {
+        let mut lines = vec![
+            line(vec![word("MA-1", 420.0, 120.0, 60.0)]),
+            label("持续推力", 200.0),
+            cell("3.0", 420.0, 200.0),
+            label("峰值推力", 240.0),
+            cell("9.0", 420.0, 240.0),
+            label("力常数", 280.0),
+            cell("1.5", 420.0, 280.0),
+            label("线圈质量", 320.0),
+            cell("0.03", 420.0, 320.0),
+            label("磁轨质量", 360.0),
+            cell("2.37", 420.0, 360.0),
+        ];
+        lines.sort_by(|a, b| a.center_y().total_cmp(&b.center_y()));
+        let sheet = sheet(800.0, 800.0, lines);
+        let table = detect_table_anchored(&sheet).expect("锚点建表");
+        let mass = table.rows.iter().find(|row| row.field == Field::Mass).expect("质量行");
+        assert!(mass.center_y < 340.0, "应使用靠上的线圈质量行: {}", mass.center_y);
+    }
+
+    #[test]
+    fn anchored_table_joins_two_level_model_header() {
+        let lines = vec![
+            line(vec![word("MA-100", 400.0, 140.0, 80.0)]),
+            line(vec![word("-V2", 400.0, 168.0, 40.0)]),
+            label("持续推力", 220.0),
+            cell("10.0", 400.0, 220.0),
+            label("峰值推力", 260.0),
+            cell("30.0", 400.0, 260.0),
+            label("力常数", 300.0),
+            cell("2.0", 400.0, 300.0),
+        ];
+        let table = detect_table_anchored(&sheet(800.0, 800.0, lines)).expect("锚点建表");
+        assert_eq!(table.columns.len(), 1);
+        assert_eq!(table.columns[0].name, "MA-100-V2");
     }
 
     /// 两列直线参数表：AUM2-S1 串联/并联 各一行数据。

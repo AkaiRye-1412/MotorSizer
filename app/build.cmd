@@ -1,8 +1,9 @@
 @echo off
 setlocal
-rem Run cargo with the bundled GNU toolchain and llvm-mingw on PATH.
+rem Build with system cargo + WinLibs MinGW-w64 (target x86_64-pc-windows-gnu).
+rem Keep this file ASCII-only: cmd.exe decodes .cmd files as ANSI/GBK.
 set "APP=%~dp0"
-set "PATH=%APP%tools\rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;%APP%tools\llvm-mingw-20261104-msvcrt-x86_64\bin;%PATH%"
-set "CARGO_HOME=%APP%tools\cargo"
-set "RUSTUP_HOME=%APP%tools\rustup"
-"%APP%tools\rustup\toolchains\stable-x86_64-pc-windows-gnu\bin\cargo.exe" %*
+set "MINGW=%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
+if exist "%MINGW%" set "PATH=%MINGW%;%PATH%"
+cd /d "%APP%"
+cargo %*

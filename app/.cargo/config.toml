@@ -1,9 +1,5 @@
-# 使用随项目附带、已验证可用的 Rust GNU 工具链与 llvm-mingw。
-# 请通过 build.cmd 调用 Cargo：构建脚本需要工具链 bin 在 PATH 中。
-# 产物固定到纯英文路径，避免 dlltool 在中文路径下生成导入库失败。
-[build]
-target-dir = "C:/Users/Administrator/Desktop/craft-anything/app/target"
-
-[target.x86_64-pc-windows-gnu]
-linker = "C:/Users/Administrator/Desktop/craft-anything/app/tools/llvm-mingw-20261104-msvcrt-x86_64/bin/gcc.exe"
-rustflags = ["-Cdlltool=C:/Users/Administrator/Desktop/craft-anything/app/tools/llvm-mingw-20261104-msvcrt-x86_64/bin/dlltool.exe"]
+# 使用系统安装的 Rust GNU 工具链与 WinLibs MinGW-w64。
+# 产物保持默认目录 app/target，run.cmd 从这里启动 exe。
+#
+# x86_64-pc-windows-gnu 默认调用 PATH 中的 gcc 作为链接器，
+# 因此这里不再固定 linker / rustflags 路径。

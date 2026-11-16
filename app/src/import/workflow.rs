@@ -183,10 +183,38 @@ fn analyze(
         return Err(ocr::CANCELLED.to_owned());
     }
 
+    // 矢量 PDF 优先读取文本层：数值没有识别误差，也不需要生成放大裁剪图。
+    // 按页混合：有文本层的页面直接用文本层数值，图片型页面才走 OCR。
+    let text_doc: Option<Vec<OcrSheet>> = if doc.kind == "pdf" {
+        pdftext::read_text_sheets(&setup.path, setup.start_page, setup.end_page)
+            .ok()
+            .map(|(sheets, _)| sheets)
+            .filter(|sheets| !sheets.is_empty())
+    } else {
+        None
+    };
+    let text_map: HashMap<u32, usize> = text_doc
+        .as_ref()
+        .map(|sheets| {
+            sheets
+                .iter()
+                .enumerate()
+                .map(|(index, sheet)| (sheet.page, index))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let render_dir = doc.render_dir.clone();
     let mut jobs: Vec<Job> = Vec::new();
     for (index, sheet) in doc.sheets.iter().enumerate() {
-        let Some(table) = parse::detect_table(sheet) else {
+        // 有文本层的页面优先用文本层建表：文字和坐标都来自 PDF，不受 OCR
+        // 误识、空页或坐标漂移影响；OCR 结果只作为兜底。
+        let text_index = text_map.get(&sheet.page).copied();
+        let text_table = text_doc.as_ref().and_then(|sheets| {
+            text_index.and_then(|index| parse::detect_table(&sheets[index]))
+        });
+        let table = text_table.or_else(|| parse::detect_table(sheet));
+        let Some(table) = table else {
             continue;
         };
         let image_path = if doc.kind == "pdf" {
@@ -216,27 +244,7 @@ fn analyze(
         total: 0,
     });
 
-    // 矢量 PDF 优先读取文本层：数值没有识别误差，也不需要生成放大裁剪图。
-    // 按页混合：有文本层的页面直接用文本层数值，图片型页面才走 OCR。
     // 全部页面都有文本层时直接返回，避免任何裁剪。
-    let text_doc: Option<Vec<OcrSheet>> = if doc.kind == "pdf" {
-        pdftext::read_text_sheets(&setup.path, setup.start_page, setup.end_page)
-            .ok()
-            .map(|(sheets, _)| sheets)
-            .filter(|sheets| !sheets.is_empty())
-    } else {
-        None
-    };
-    let text_map: HashMap<u32, usize> = text_doc
-        .as_ref()
-        .map(|sheets| {
-            sheets
-                .iter()
-                .enumerate()
-                .map(|(index, sheet)| (sheet.page, index))
-                .collect()
-        })
-        .unwrap_or_default();
     if !jobs.is_empty() && jobs.iter().all(|job| text_map.contains_key(&job.table.page)) {
         if let Some(sheets) = text_doc.as_ref() {
             return analyze_text(doc, &jobs, sheets, setup, existing, workspace);
@@ -888,6 +896,46 @@ fn analyze_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 诊断：对真实样册指定页码跑完整导入，打印候选字段。
+    #[test]
+    fn diagnostic_real_pdf_page() {
+        let Ok(path) = std::env::var("MOTORSIZER_PDF_FIXTURE") else {
+            return;
+        };
+        let page: u32 = std::env::var("MOTORSIZER_PDF_PAGE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1);
+        let workspace = crate::import::ocr::new_workspace().expect("工作区");
+        let cancel = workspace.join("cancel");
+        let setup = Setup {
+            path: std::path::PathBuf::from(&path),
+            start_page: page,
+            end_page: page,
+        };
+        let preview = run(&setup, &[], &workspace, &cancel, &|_| {}).expect("导入失败");
+        for candidate in &preview.candidates {
+            eprintln!(
+                "{} p{} usable={} cont={} peak={} kf={} km={} ic={} ip={} ke={} mass={} len={} page={}",
+                candidate.motor.name,
+                candidate.page,
+                is_usable(&candidate.motor),
+                candidate.motor.cont,
+                candidate.motor.peak,
+                candidate.motor.kf,
+                candidate.motor.km,
+                candidate.motor.i_cont,
+                candidate.motor.i_peak,
+                candidate.motor.ke,
+                candidate.motor.mover_mass,
+                candidate.motor.length,
+                candidate.motor.kind == crate::data::motor::MotorKind::Rotary,
+            );
+        }
+        eprintln!("engine={} candidates={}", preview.engine, preview.candidates.len());
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 
     #[test]
     fn usable_requires_core_selection_fields() {

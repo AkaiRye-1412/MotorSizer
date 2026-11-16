@@ -20,7 +20,6 @@ fn main() -> eframe::Result<()> {
     // 截图自检用的导入入口：预先选中文件，可选立即开始识别。
     let mut import_path = None;
     let mut import_run = false;
-    let mut import_commit = false;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         if argument == "--screenshot" {
@@ -31,8 +30,6 @@ fn main() -> eframe::Result<()> {
             import_path = args.next().map(PathBuf::from);
         } else if argument == "--import-run" {
             import_run = true;
-        } else if argument == "--import-commit" {
-            import_commit = true;
         } else if argument == "--tab" {
             // 便于截图自检直接指定直线/旋转页面。
             tab = match args.next().as_deref() {
@@ -95,7 +92,6 @@ fn main() -> eframe::Result<()> {
                 tab,
                 import_path,
                 import_run,
-                import_commit,
             )))
         }),
     )

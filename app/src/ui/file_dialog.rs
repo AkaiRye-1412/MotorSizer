@@ -9,7 +9,34 @@ use std::path::PathBuf;
 pub fn save_markdown(suggested_name: &str, initial_dir: Option<&std::path::Path>) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        windows::save(suggested_name, initial_dir)
+        windows::save_file(
+            suggested_name,
+            initial_dir,
+            "Markdown 报告 (*.md)\0*.md\0所有文件 (*.*)\0*.*\0\0",
+            "导出选型报告",
+            "md",
+        )
+        .map(ensure_markdown_extension)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (suggested_name, initial_dir);
+        None
+    }
+}
+
+/// 弹出保存对话框，用于把识别结果导出为 Excel 草稿。
+pub fn save_excel(suggested_name: &str, initial_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        windows::save_file(
+            suggested_name,
+            initial_dir,
+            "Excel 工作簿 (*.xlsx)\0*.xlsx\0所有文件 (*.*)\0*.*\0\0",
+            "导出电机参数",
+            "xlsx",
+        )
+        .map(ensure_xlsx_extension)
     }
     #[cfg(not(windows))]
     {
@@ -41,13 +68,25 @@ fn ensure_markdown_extension(path: PathBuf) -> PathBuf {
     }
 }
 
+/// 参数表必须是 `.xlsx`；用户写成别的扩展名时强制改回。
+fn ensure_xlsx_extension(path: PathBuf) -> PathBuf {
+    let is_xlsx = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().eq_ignore_ascii_case("xlsx"))
+        .unwrap_or(false);
+    if is_xlsx {
+        return path;
+    }
+    let mut path = path;
+    path.set_extension("xlsx");
+    path
+}
+
 #[cfg(windows)]
 mod windows {
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
     use std::path::PathBuf;
-
-    use super::ensure_markdown_extension;
 
     const OFN_OVERWRITEPROMPT: u32 = 0x0000_0002;
     const OFN_NOCHANGEDIR: u32 = 0x0000_0008;
@@ -94,16 +133,20 @@ mod windows {
         fn GetActiveWindow() -> *mut c_void;
     }
 
-    pub(super) fn save(suggested_name: &str, initial_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    pub(super) fn save_file(
+        suggested_name: &str,
+        initial_dir: Option<&std::path::Path>,
+        filter_text: &str,
+        dialog_title: &str,
+        default_extension: &str,
+    ) -> Option<PathBuf> {
         let mut file: Vec<u16> = suggested_name.encode_utf16().collect();
         file.push(0);
         // 留足空间给用户在对话框里继续输入长文件名。
         file.resize(1024, 0);
-        let filter: Vec<u16> = "Markdown 报告 (*.md)\0*.md\0所有文件 (*.*)\0*.*\0\0"
-            .encode_utf16()
-            .collect();
-        let title = wide("导出选型报告");
-        let default_ext = wide("md");
+        let filter: Vec<u16> = filter_text.encode_utf16().collect();
+        let title = wide(dialog_title);
+        let default_ext = wide(default_extension);
         let initial_dir = initial_dir.map(|dir| {
             dir.as_os_str()
                 .encode_wide()
@@ -150,17 +193,17 @@ mod windows {
             .iter()
             .position(|unit| *unit == 0)
             .unwrap_or(file.len());
-        let path = PathBuf::from(String::from_utf16_lossy(&file[..length]));
-        Some(ensure_markdown_extension(path))
+        Some(PathBuf::from(String::from_utf16_lossy(&file[..length])))
     }
 
     pub(super) fn open_document() -> Option<PathBuf> {
         let mut file = vec![0_u16; 1024];
-        let filter: Vec<u16> = "支持文档 (*.pdf;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp)\0\
-            *.pdf;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp\0\
+        let filter: Vec<u16> = "支持文档 (*.pdf;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp;*.xlsx)\0\
+            *.pdf;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp;*.xlsx\0\
             PDF (*.pdf)\0*.pdf\0\
             图片 (*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp)\0\
             *.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp\0\
+            Excel 参数表 (*.xlsx)\0*.xlsx\0\
             所有文件 (*.*)\0*.*\0\0"
             .encode_utf16()
             .collect();

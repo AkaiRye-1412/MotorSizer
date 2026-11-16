@@ -19,8 +19,6 @@ pub struct App {
     window_shown: bool,
     /// 自检入口：首帧后自动开始识别（`--import-run`）。
     import_run: bool,
-    /// 自检入口：预览就绪后自动写库（`--import-commit`）。
-    import_commit: bool,
     /// 截图需等识别进入预览/失败状态再取帧（`--import-run`）。
     wait_import: bool,
     /// 数据加载成功时才有状态；失败时显示错误页而不是崩溃。
@@ -34,7 +32,6 @@ impl App {
         tab: Tab,
         import_path: Option<PathBuf>,
         import_run: bool,
-        import_commit: bool,
     ) -> Self {
         let (mut state, startup_error) = match AppState::new() {
             Ok(mut state) => {
@@ -55,7 +52,6 @@ impl App {
             shot_asked: false,
             window_shown: false,
             import_run,
-            import_commit,
             wait_import: import_run,
             state,
             startup_error,
@@ -65,10 +61,6 @@ impl App {
     /// 导入自检截图要等识别结束（预览或失败），避免截到进度页；
     /// 超时后仍取当前画面，防止 OCR 卡住让自检无法退出。
     fn import_ready_for_shot(&self) -> bool {
-        // 等待自动写库完成，截图才能反映出库后的状态。
-        if self.import_commit {
-            return false;
-        }
         if !self.wait_import || self.frames >= 1800 {
             return true;
         }
@@ -142,19 +134,6 @@ impl eframe::App for App {
                 state.begin_import(&ctx);
             }
             state.poll_import(&ctx);
-            if self.import_commit {
-                match &state.import.phase {
-                    ImportPhase::Preview(_) => {
-                        self.import_commit = false;
-                        if let Err(error) = state.import_selected() {
-                            state.status = format!("导入失败：{error}");
-                        }
-                    }
-                    // 识别失败或取消时不再等待，让截图照常退出。
-                    ImportPhase::Failed(_) | ImportPhase::Closed => self.import_commit = false,
-                    _ => {}
-                }
-            }
             state.recompute_if_dirty();
             ui::layout::show(state, ui);
         }
