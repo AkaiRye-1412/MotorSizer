@@ -10,5 +10,11 @@
 # Local build logs
 /app/*.log
 
+# Packaged release folder（安装包通过 Release 附件分发，不进仓库）
+/app/dist/
+
+# 厂商原厂样册，受版权保护，仅保留在本地磁盘
+/sources/
+
 
 
